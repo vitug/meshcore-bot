@@ -1,3 +1,15 @@
+# 1. Добавляем вашего пользователя в группу meshcore
+sudo usermod -a -G meshcore user
+
+# 2. Даём группе права на запись в папку с ботом и всё внутри
+sudo chgrp -R meshcore /opt/meshcore-bot
+sudo chmod -R 775 /opt/meshcore-bot
+
+# 3. (Опционально, но очень рекомендуется) делаем так, чтобы новые файлы тоже наследовали группу meshcore
+sudo chmod g+s /opt/meshcore-bot
+# если хотите, чтобы и подкаталоги тоже наследовали группу:
+find /opt/meshcore-bot -type d -exec chmod g+s {} \;
+
 cd ~/Meshcore/meshcore-bot
 
 # Создаём виртуальное окружение
