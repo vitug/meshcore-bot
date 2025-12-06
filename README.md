@@ -1,3 +1,13 @@
+# 2. Отдаём файл в полное владение пользователю meshcore
+sudo chown meshcore:meshcore /opt/meshcore-bot/meshcore_bot.db
+
+# 3. Даём нормальные права на чтение-запись
+sudo chmod 664 /opt/meshcore-bot/meshcore_bot.db
+
+# 4. На всякий случай проверяем и исправляем права на папку (очень важно!)
+sudo chown meshcore:meshcore /opt/meshcore-bot
+sudo chmod 775 /opt/meshcore-bot
+
 # 1. Добавляем вашего пользователя в группу meshcore
 sudo usermod -a -G meshcore user
 
