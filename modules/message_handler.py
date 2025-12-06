@@ -269,6 +269,7 @@ class MessageHandler:
                         self.logger.debug(f"Found full public key for {sender_id}: {sender_pubkey[:16]}...")
                         break
             
+            hops = path_len if path_len != 255 else 0
             if hops > 0:
                 path_string = f"{path_string} ({hops} hops)"
             # Convert to our message format
@@ -280,7 +281,7 @@ class MessageHandler:
                 timestamp=timestamp,
                 snr=snr,
                 rssi=rssi,
-                hops=path_len if path_len != 255 else 0,
+                hops=hops,
                 path=path_info
             )
             
