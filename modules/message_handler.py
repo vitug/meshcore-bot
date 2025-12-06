@@ -272,6 +272,8 @@ class MessageHandler:
                         self.logger.debug(f"Found full public key for {sender_name}: {sender_pubkey[:16]}...")
                         break
             
+            if hops > 0:
+                path_string = f"{path_string} ({hops} hops)
             # Sanitize message content to prevent injection attacks
             # Note: Firmware enforces 150-char limit at hardware level, so we disable length check
             # but still strip control characters for security

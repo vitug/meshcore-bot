@@ -1,3 +1,21 @@
+cd ~/Meshcore/meshcore-bot
+
+# Создаём виртуальное окружение
+python3 -m venv venv
+
+# Активируем его
+source venv/bin/activate
+
+# Теперь pip работает без ограничений
+pip install --upgrade pip
+pip install -r requirements.txt
+
+source venv/bin/activate    # каждый раз при новом терминале
+python main.py              # или python bot.py — смотри, какой файл там основной
+
+# Посмотри, какие USB-устройства вообще видны
+ls -la /dev/tty*
+
 # MeshCore Bot
 
 A Python bot that connects to MeshCore mesh networks via serial port, BLE, or TCP/IP. The bot responds to messages containing configured keywords, executes commands, and provides various data services including weather, solar conditions, and satellite pass information.

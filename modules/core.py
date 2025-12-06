@@ -38,6 +38,12 @@ from .web_viewer.integration import WebViewerIntegration
 from .feed_manager import FeedManager
 from .security_utils import validate_safe_path
 
+import sys
+import io
+if sys.platform.startswith('win'):
+    # Принудительно включаем UTF-8 в консоли Windows
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 class MeshCoreBot:
     """MeshCore Bot using official meshcore package"""
@@ -565,6 +571,7 @@ use_zulu_time = false
         
         # File handler
         log_file = self.config.get('Logging', 'log_file', fallback='meshcore_bot.log')
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
         
         # Validate log file path for security (prevent path traversal)
         # Use explicit bot root directory (where config.ini is located)

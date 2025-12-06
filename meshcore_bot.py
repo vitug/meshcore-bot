@@ -7,6 +7,15 @@ Uses a modular structure for command creation and organization
 import asyncio
 import signal
 import sys
+import os
+import logging
+import io
+
+os.environ["PYTHONIOENCODING"] = "utf-8"
+
+if sys.platform.startswith("win"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # Import the modular bot
 from modules.core import MeshCoreBot
@@ -30,6 +39,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error: {e}")
         asyncio.run(bot.stop())
-
-
-
