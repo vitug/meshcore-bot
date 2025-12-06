@@ -73,7 +73,8 @@ class PrefixCommand(BaseCommand):
         
         # Check if message starts with 'prefix' (with or without space)
         content_lower = content.lower()
-        return content_lower == 'prefix' or content_lower.startswith('prefix ')
+        # return content_lower == 'prefix' or content_lower.startswith('prefix ')
+        return content_lower == 'prefix' or content_lower.startswith('prefix ') or content_lower == 'prf' or content_lower.startswith('prf ') or content_lower == 'rp' or content_lower.startswith('rp ')
     
     async def execute(self, message: MeshMessage) -> bool:
         """Execute the prefix command"""

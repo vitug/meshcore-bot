@@ -36,6 +36,12 @@ from .i18n import Translator
 from .solar_conditions import set_config
 from .web_viewer.integration import WebViewerIntegration
 
+import sys
+import io
+if sys.platform.startswith('win'):
+    # Принудительно включаем UTF-8 в консоли Windows
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 class MeshCoreBot:
     """MeshCore Bot using official meshcore package"""
@@ -537,7 +543,8 @@ use_zulu_time = false
         
         # File handler
         log_file = self.config.get('Logging', 'log_file', fallback='meshcore_bot.log')
-        file_handler = logging.FileHandler(log_file)
+        #file_handler = logging.FileHandler(log_file)
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
         
