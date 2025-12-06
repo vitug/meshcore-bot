@@ -275,6 +275,7 @@ class MessageHandler:
             hops = path_len if path_len != 255 else 0
             if hops > 0:
                 path_string = f"{path_string} ({hops} hops)
+
             # Sanitize message content to prevent injection attacks
             # Note: Firmware enforces 150-char limit at hardware level, so we disable length check
             # but still strip control characters for security
@@ -290,7 +291,7 @@ class MessageHandler:
                 timestamp=timestamp,
                 snr=snr,
                 rssi=rssi,
-                hops=hops,
+                hops=path_len if path_len != 255 else 0,
                 path=path_info
             )
             
@@ -1364,6 +1365,8 @@ class MessageHandler:
                         self.logger.debug(f"Found full public key for {sender_id}: {sender_pubkey[:16]}...")
                         break
             
+            if hops > 0:
+                path_string = f"{path_string} ({hops} hops)"            
             # Convert to our message format
             message = MeshMessage(
                 content=message_content,  # Use the extracted message content
