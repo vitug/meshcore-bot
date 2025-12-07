@@ -153,11 +153,12 @@ class MeshCoreBot:
         self.logger.info(f"MeshCore Bot initialized: {self.config.get('Bot', 'bot_name')}")
     
     def load_config(self):
-        """Load configuration from file"""
-        if not Path(self.config_file).exists():
-            self.create_default_config()
-        
-        self.config.read(self.config_file)
+            """Load configuration from file"""
+            if not Path(self.config_file).exists():
+                self.create_default_config()
+
+            # Явно указываем UTF-8 — это решает проблему навсегда
+            self.config.read(self.config_file, encoding='utf-8')
     
     def create_default_config(self):
         """Create default configuration file"""

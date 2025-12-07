@@ -18,7 +18,7 @@ class TestCommand(BaseCommand):
     
     # Plugin metadata
     name = "test"
-    keywords = ['test', 't']
+    keywords = ['test', 't', 'тест', 'т']
     description = "Responds to 'test' or 't' with connection info"
     category = "basic"
     
@@ -35,30 +35,44 @@ class TestCommand(BaseCommand):
         return cleaned
     
     def matches_keyword(self, message: MeshMessage) -> bool:
-        """Override to implement special test keyword matching with optional phrase"""
-        # Clean content to remove control characters and normalize whitespace
+        """Проверка — начинается ли сообщение с одного из ключевых слов"""
         content = self.clean_content(message.content)
-        
-        # Strip exclamation mark if present (for command-style messages)
+
+        # Поддержка !test, !t и т.д.
         if content.startswith('!'):
             content = content[1:].strip()
-        
-        # Handle "test" alone or "test " with phrase
-        if content.lower() == "test" or content.lower() == "тест":
-            return True  # Just "test" by itself
-        elif (content.startswith('test ') or content.startswith('Test ') or content.startswith('тест ') or content.startswith('Тест ')) and len(content) > 5:
-            phrase = content[5:].strip()  # Get everything after "test " and strip whitespace
-            return bool(phrase)  # Make sure there's actually a phrase
-        
-        # Handle "t" alone or "t " with phrase
-        elif content.lower() == "t" or content.lower() == "т":
-            return True  # Just "t" by itself
-        elif (content.startswith('t ') or content.startswith('T ') or content.startswith('т ') or content.startswith('Т ')) and len(content) > 2:
-            phrase = content[2:].strip()  # Get everything after "t " and strip whitespace
-            return bool(phrase)  # Make sure there's actually a phrase
-        
+
+        lower = content.lower()
+
+        for kw in self.keywords:
+            kw_low = kw.lower()
+            # Просто ключевое слово
+            if lower == kw_low:
+                return True
+            # Ключевое слово + пробел + любой текст
+            if lower.startswith(kw_low + ' ') and len(content) > len(kw_low) + 1:
+                return True
+
         return False
-    
+
+    def extract_phrase(self, message: MeshMessage) -> str:
+        """Возвращает текст после ключевого слова (если есть)"""
+        content = self.clean_content(message.content)
+        if content.startswith('!'):
+            content = content[1:].strip()
+
+        lower = content.lower()
+
+        for kw in self.keywords:
+            kw_low = kw.lower()
+            if lower.startswith(kw_low + ' '):
+                # Всё после ключевого слова и пробела
+                return content[len(kw_low):].strip()
+            if lower == kw_low:
+                return ""
+
+        return "" 
+            
     def get_response_format(self) -> str:
         """Get the response format from config"""
         if self.bot.config.has_section('Keywords'):
@@ -103,8 +117,7 @@ class TestCommand(BaseCommand):
             return valid_parts
         
         return []
-    
-    
+        
     def _lookup_repeater_location(self, node_id: str, path_context: Optional[List[str]] = None) -> Optional[Tuple[float, float]]:
         """Look up repeater location for a node ID using geographic proximity selection when path context is available"""
         try:
@@ -439,28 +452,7 @@ class TestCommand(BaseCommand):
     
     def format_response(self, message: MeshMessage, response_format: str) -> str:
         """Override to handle phrase extraction"""
-        # Clean content to remove control characters and normalize whitespace
-        content = self.clean_content(message.content)
-        
-        # Strip exclamation mark if present (for command-style messages)
-        if content.startswith('!'):
-            content = content[1:].strip()
-        
-        # Extract phrase if present, otherwise use empty string
-        if content.lower() == "test":
-            phrase = ""
-        elif content.lower() == "t":
-            phrase = ""
-        elif content.lower() == "тест":
-            phrase = ""
-        elif content.lower() == "т":
-            phrase = ""
-        elif content.startswith('test ') or content.startswith('Test ') or content.startswith('тест ') or content.startswith('Тест '):
-            phrase = content[5:].strip()  # Get everything after "test "
-        elif content.startswith('t ') or content.startswith('T ') or content.startswith('т ') or content.startswith('Т '):
-            phrase = content[2:].strip()  # Get everything after "t "
-        else:
-            phrase = ""
+        phrase = self.extract_phrase(message)
         
         try:
             connection_info = self.build_enhanced_connection_info(message)
