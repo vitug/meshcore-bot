@@ -44,16 +44,16 @@ class TestCommand(BaseCommand):
             content = content[1:].strip()
         
         # Handle "test" alone or "test " with phrase
-        if content.lower() == "test":
+        if content.lower() == "test" or content.lower() == "тест":
             return True  # Just "test" by itself
-        elif (content.startswith('test ') or content.startswith('Test ')) and len(content) > 5:
+        elif (content.startswith('test ') or content.startswith('Test ') or content.startswith('тест ') or content.startswith('Тест ')) and len(content) > 5:
             phrase = content[5:].strip()  # Get everything after "test " and strip whitespace
             return bool(phrase)  # Make sure there's actually a phrase
         
         # Handle "t" alone or "t " with phrase
-        elif content.lower() == "t":
+        elif content.lower() == "t" or content.lower() == "т":
             return True  # Just "t" by itself
-        elif (content.startswith('t ') or content.startswith('T ')) and len(content) > 2:
+        elif (content.startswith('t ') or content.startswith('T ') or content.startswith('т ') or content.startswith('Т ')) and len(content) > 2:
             phrase = content[2:].strip()  # Get everything after "t " and strip whitespace
             return bool(phrase)  # Make sure there's actually a phrase
         
@@ -451,9 +451,13 @@ class TestCommand(BaseCommand):
             phrase = ""
         elif content.lower() == "t":
             phrase = ""
-        elif content.startswith('test ') or content.startswith('Test '):
+        elif content.lower() == "тест":
+            phrase = ""
+        elif content.lower() == "т":
+            phrase = ""
+        elif content.startswith('test ') or content.startswith('Test ') or content.startswith('тест ') or content.startswith('Тест '):
             phrase = content[5:].strip()  # Get everything after "test "
-        elif content.startswith('t ') or content.startswith('T '):
+        elif content.startswith('t ') or content.startswith('T ') or content.startswith('т ') or content.startswith('Т '):
             phrase = content[2:].strip()  # Get everything after "t "
         else:
             phrase = ""
