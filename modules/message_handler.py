@@ -1602,6 +1602,15 @@ class MessageHandler:
                 stats_command.record_message(message)
                 stats_command.record_path_stats(message)
         
+        # === Telegram Bridge — пересылаем ВСЕ подходящие сообщения ДО обработки команд ===
+        if 'telegram_bridge' in self.bot.command_manager.commands:
+            bridge_command = self.bot.command_manager.commands['telegram_bridge']
+            if bridge_command and bridge_command.should_execute(message):
+                try:
+                    await bridge_command.execute(message)
+                except Exception as e:
+                    self.logger.error(f"Error executing telegram_bridge command: {e}")
+                    
         # Check greeter command for public channel messages (BEFORE general message filtering)
         # This allows greeter to work on its own configured channels even if not in monitor_channels
         if 'greeter' in self.bot.command_manager.commands:
