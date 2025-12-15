@@ -1666,6 +1666,15 @@ class MessageHandler:
                 else:
                     self.logger.info(f"Keyword '{keyword}' matched, responding")
                 
+                # Record command execution in stats database
+                if 'stats' in self.bot.command_manager.commands:
+                    stats_command = self.bot.command_manager.commands['stats']
+                    if stats_command and not keyword == 'telegram_bridge':
+                        stats_command.record_command(message, keyword, response is not None)
+                
+                # Note: Command data capture is handled in command_manager.py after execution
+                # to avoid duplicate messages to web viewer
+                
                 # Track if this is a help response
                 if keyword == 'help':
                     help_response_sent = True

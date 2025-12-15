@@ -26,7 +26,7 @@ CHAT_ID_SENT: set = set()
 
 class TelegramBridgeCommand(BaseCommand):
     name = "telegram_bridge"
-    keywords = [""]
+    keywords = []
     description = "Мост с Telegram: пересылает сообщения в TG и обратно + авто-отправка chat_id + /status"
     category = "system"
     requires_dm = False
@@ -86,7 +86,7 @@ class TelegramBridgeCommand(BaseCommand):
         Проверка, нужно ли пересылать данное сообщение в Telegram.
         Логика аналогична GreeterCommand — все фильтры здесь.
         """
-        self.logger.info(f"[TelegramBridge] should_execute вызван для сообщения от {message.sender_id} (канал: {message.channel}, DM: {message.is_dm})")        
+        self.logger.debug(f"[TelegramBridge] should_execute вызван для сообщения от {message.sender_id} (канал: {message.channel}, DM: {message.is_dm})")        
         
         if not self.enabled:
             self.logger.debug("Мост отключён (enabled=False)")
@@ -218,9 +218,9 @@ class TelegramBridgeCommand(BaseCommand):
 
     async def execute(self, message: MeshMessage) -> bool:
         """Пересылка сообщений из MeshCore → Telegram только после проверки should_execute"""
-        self.logger.info(f"[TelegramBridge] execute вызван для сообщения от {message.sender_id} (канал: {message.channel}, DM: {message.is_dm})")
+        self.logger.debug(f"[TelegramBridge] execute вызван для сообщения от {message.sender_id} (канал: {message.channel}, DM: {message.is_dm})")
 
-        # Первая проверка — должна ли бридж обрабатывать это сообщение
+        # Первая проверка — должен ли бридж обрабатывать это сообщение
         if not self.should_execute(message):
             return False
 
@@ -228,8 +228,28 @@ class TelegramBridgeCommand(BaseCommand):
 
         try:
             sender = message.sender_id or "Unknown"
-            text = f"<b>{sender}</b>: {message.content.strip()}" if self.prefix_sender else message.content.strip()
-            channel_info = f" {message.channel}" if message.channel and not message.is_dm else f" (канал: {message.channel or 'DM'})"
+            content = message.content.strip()
+
+            # Формируем префикс с отправителем
+            text = f"<b>{sender}</b>: {content}" if self.prefix_sender else content
+
+            # Формируем информацию о канале с #
+            if message.is_dm:
+                # Для DM — # + имя отправителя (без _, -, пробелов)
+                clean_sender = sender.replace('_', '').replace('-', '').replace(' ', '')
+                channel_tag = f"#{clean_sender}"
+                channel_info = f" (#DM {channel_tag})"
+            else:
+                # Для публичных каналов — добавляем # если его нет, удаляем _ и -
+                if message.channel:
+                    channel_name = message.channel.strip()
+                    clean_channel = channel_name.replace('_', '').replace('-', '').replace(' ', '')
+                    if not clean_channel.startswith('#'):
+                        clean_channel = f"#{clean_channel}"
+                    channel_info = f" {clean_channel}"
+                else:
+                    channel_info = " #unknown"
+
             full_text = f"{text}{channel_info}"
 
             sent_msg = await self._send_to_telegram_from_correct_loop(
