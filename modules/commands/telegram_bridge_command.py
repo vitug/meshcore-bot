@@ -8,11 +8,13 @@ Telegram Bridge Command для MeshCore Bot
 + Добавлен метод should_execute() с логикой фильтрации (как в GreeterCommand)
 + Отправка в Telegram происходит только после should_execute()
 + Исправлена отправка из другого потока через run_coroutine_threadsafe
++ ОТПРАВКА В TELEGRAM ПОЛНОСТЬЮ АСИНХРОННАЯ — НЕ БЛОКИРУЕТ ОСНОВНОЙ ЦИКЛ БОТА
+  (убран future.result() — теперь обработка результата в фоновом потоке)
 """
 
 import asyncio
+import threading
 from typing import Dict, Optional
-from concurrent.futures import Future
 from .base_command import BaseCommand
 from ..models import MeshMessage
 
@@ -33,7 +35,6 @@ class TelegramBridgeCommand(BaseCommand):
 
     def __init__(self, bot):
         super().__init__(bot)
-
         self.enabled = bot.config.getboolean('Telegram_Bridge', 'enabled', fallback=False)
         self.telegram_chat_id = bot.config.get('Telegram_Bridge', 'telegram_chat_id', fallback=None)
         self.telegram_token = bot.config.get('Telegram_Bridge', 'telegram_token', fallback=None)
@@ -62,21 +63,22 @@ class TelegramBridgeCommand(BaseCommand):
     def matches_keyword(self, message: MeshMessage) -> bool:
         """Глобальный Telegram-мост — получаем все сообщения для проверки should_execute"""
         return False
-        
+
     def matches_custom_syntax(self, message: MeshMessage) -> bool:
         """Bridge doesn't match custom syntax"""
         return False
-        
+
     def get_response_format(self) -> Optional[str]:
         """Get the response format for this command from config"""
         return ""
-        
+
     def _parse_forward_channels(self) -> set:
+        """Парсит настройку forward_channels из config.ini"""
         raw = self.bot.config.get('Telegram_Bridge', 'forward_channels', fallback='all').strip().lower()
         self.logger.debug(f"Raw forward_channels из config: '{raw}'")
         if raw in ['all', '*', '']:
             self.logger.info("forward_channels = all → пересылаем ВСЕ каналы")
-            return set()
+            return set()  # пустой set означает "все каналы"
         channels = {ch.strip() for ch in raw.split(',') if ch.strip()}
         self.logger.info(f"forward_channels parsed: {channels}")
         return channels
@@ -86,12 +88,11 @@ class TelegramBridgeCommand(BaseCommand):
         Проверка, нужно ли пересылать данное сообщение в Telegram.
         Логика аналогична GreeterCommand — все фильтры здесь.
         """
-        self.logger.debug(f"[TelegramBridge] should_execute вызван для сообщения от {message.sender_id} (канал: {message.channel}, DM: {message.is_dm})")        
-        
+        self.logger.debug(f"[TelegramBridge] should_execute вызван для сообщения от {message.sender_id} (канал: {message.channel}, DM: {message.is_dm})")
+
         if not self.enabled:
             self.logger.debug("Мост отключён (enabled=False)")
             return False
-
         if not self.telegram_chat_id:
             self.logger.debug("telegram_chat_id не указан — пересылка отключена")
             return False
@@ -106,15 +107,14 @@ class TelegramBridgeCommand(BaseCommand):
             if message.channel not in self.forward_channels:
                 self.logger.debug(f"Канал '{message.channel}' не в разрешённых {self.forward_channels} — пропуск")
                 return False
-        # Если forward_channels пустой (all) — пропускаем все
 
+        # Если forward_channels пустой (all) — пропускаем все
         return True
 
     def _init_telegram_bot(self):
         """Инициализация AsyncTeleBot с запуском поллинга в отдельном потоке"""
         try:
             from telebot.async_telebot import AsyncTeleBot
-            import threading
 
             self.tg_bot = AsyncTeleBot(self.telegram_token)
 
@@ -125,7 +125,6 @@ class TelegramBridgeCommand(BaseCommand):
                 conn_status = "🟢 Подключено" if hasattr(self.bot.meshcore, 'connected') and self.bot.meshcore.connected else "🔴 Отключено"
                 bridge_status = "✅ Активен" if self.enabled and self.telegram_chat_id else "⚠️ Ожидает chat_id"
                 target_chat = self.telegram_chat_id or "не указан"
-
                 status_text = (
                     f"📡 <b>Статус Telegram Bridge</b>\n\n"
                     f"Мост: {bridge_status}\n"
@@ -140,7 +139,6 @@ class TelegramBridgeCommand(BaseCommand):
             @self.tg_bot.message_handler(func=lambda m: True)
             async def handle_telegram_message(tg_message):
                 chat_id_str = str(tg_message.chat.id)
-
                 # Авто-отправка chat_id при первом сообщении
                 if tg_message.chat.id not in CHAT_ID_SENT:
                     welcome_text = (
@@ -172,7 +170,6 @@ class TelegramBridgeCommand(BaseCommand):
                                        tg_message.from_user.username or
                                        "TG-User")
                         reply_text = f"Ответ от {sender_name} (TG):\n{response_text}"
-
                         await self.bot.meshcore.commands.send_text(
                             text=reply_text,
                             channel=original_mesh_msg.channel,
@@ -194,30 +191,63 @@ class TelegramBridgeCommand(BaseCommand):
             self.logger.error(f"Ошибка инициализации Telegram бота: {e}")
             self.enabled = False
 
-    async def _send_to_telegram_from_correct_loop(self, chat_id: str, text: str):
-        """Отправка сообщения в правильном event loop Telegram-потока"""
+    async def _save_reply_mapping(self, sent_msg, original_mesh_msg: MeshMessage):
+        """
+        Потокобезопасное сохранение маппинга telegram_message_id → MeshMessage
+        Вызывается из фонового потока, но сохраняет данные в основном loop бота
+        """
+        async with REPLY_MAPPING_LOCK:
+            key = (sent_msg.chat.id, sent_msg.message_id)
+            REPLY_MAPPING[key] = original_mesh_msg
+            if len(REPLY_MAPPING) > 1000:
+                # Удаляем самые старые записи для экономии памяти
+                keys_to_remove = sorted(REPLY_MAPPING.keys(), key=lambda k: k[1])[:200]
+                for k in keys_to_remove:
+                    REPLY_MAPPING.pop(k, None)
+
+    async def _send_to_telegram_non_blocking(self, chat_id: str, text: str, original_message: MeshMessage):
+        """
+        Отправка сообщения в Telegram БЕЗ БЛОКИРОВКИ основного цикла бота.
+        Основной поток только ставит задачу в очередь и сразу возвращается.
+        Обработка результата (включая сохранение REPLY_MAPPING) происходит в фоновом потоке.
+        """
         if not self.tg_bot or not self.tg_loop:
             self.logger.error("Telegram бот или loop не инициализированы")
-            return None
+            return
 
-        future = asyncio.run_coroutine_threadsafe(
-            self.tg_bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            ),
-            self.tg_loop
+        # Формируем корутину отправки
+        coro = self.tg_bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode='HTML',
+            disable_web_page_preview=True
         )
 
-        try:
-            return future.result(timeout=30)
-        except Exception as e:
-            self.logger.error(f"Ошибка при отправке в Telegram: {e}", exc_info=True)
-            return None
+        # Запускаем её в Telegram-loop (другой поток)
+        future = asyncio.run_coroutine_threadsafe(coro, self.tg_loop)
+
+        # Фоновая функция для обработки результата отправки
+        def _handle_send_result():
+            try:
+                sent_msg = future.result(timeout=30)  # Здесь можно ждать — это отдельный поток
+                if sent_msg:
+                    # Сохраняем маппинг в основном loop бота (потокобезопасно)
+                    asyncio.run_coroutine_threadsafe(
+                        self._save_reply_mapping(sent_msg, original_message),
+                        self.bot.loop  # основной event loop MeshCore бота
+                    )
+                    self.logger.info(f"Сообщение успешно переслано в Telegram (msg_id={sent_msg.message_id})")
+            except Exception as e:
+                self.logger.error(f"Ошибка при отправке в Telegram: {e}", exc_info=True)
+
+        # Запускаем обработку результата в отдельном daemon-потоке
+        threading.Thread(target=_handle_send_result, daemon=True).start()
 
     async def execute(self, message: MeshMessage) -> bool:
-        """Пересылка сообщений из MeshCore → Telegram только после проверки should_execute"""
+        """
+        Пересылка сообщений из MeshCore → Telegram
+        Теперь полностью асинхронная — основной цикл бота не ждёт ответа от Telegram API
+        """
         self.logger.debug(f"[TelegramBridge] execute вызван для сообщения от {message.sender_id} (канал: {message.channel}, DM: {message.is_dm})")
 
         # Первая проверка — должен ли бридж обрабатывать это сообщение
@@ -252,27 +282,17 @@ class TelegramBridgeCommand(BaseCommand):
 
             full_text = f"{text}{channel_info}"
 
-            sent_msg = await self._send_to_telegram_from_correct_loop(
-                chat_id=self.telegram_chat_id,
-                text=full_text
+            # АСИНХРОННАЯ ОТПРАВКА: основной поток НЕ ЖДЁТ результата
+            asyncio.create_task(
+                self._send_to_telegram_non_blocking(
+                    chat_id=self.telegram_chat_id,
+                    text=full_text,
+                    original_message=message
+                )
             )
-
-            if not sent_msg:
-                self.logger.error("Не удалось отправить сообщение в Telegram")
-                return False
-
-            async with REPLY_MAPPING_LOCK:
-                key = (sent_msg.chat.id, sent_msg.message_id)
-                REPLY_MAPPING[key] = message
-
-                if len(REPLY_MAPPING) > 1000:
-                    keys_to_remove = sorted(REPLY_MAPPING.keys(), key=lambda k: k[1])[:200]
-                    for k in keys_to_remove:
-                        REPLY_MAPPING.pop(k, None)
-
-            self.logger.info(f"Сообщение успешно переслано в Telegram (msg_id={sent_msg.message_id})")
+            self.logger.debug("Сообщение поставлено в очередь на отправку в Telegram (неблокирующе)")
 
         except Exception as e:
-            self.logger.error(f"Ошибка пересылки в Telegram: {e}", exc_info=True)
+            self.logger.error(f"Ошибка подготовки пересылки в Telegram: {e}", exc_info=True)
 
         return False

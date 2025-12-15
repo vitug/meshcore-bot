@@ -149,7 +149,9 @@ class MeshCoreBot:
         
         # Advert tracking
         self.last_advert_time = None
-        
+
+        self.loop = asyncio.get_event_loop()
+
         self.logger.info(f"MeshCore Bot initialized: {self.config.get('Bot', 'bot_name')}")
     
     def load_config(self):
