@@ -170,7 +170,9 @@ class MeshCoreBot:
         
         # Advert tracking
         self.last_advert_time = None
-        
+
+        self.loop = asyncio.get_event_loop()
+
         # Clock sync tracking
         self.last_clock_sync_time = None
     
