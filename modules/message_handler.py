@@ -1607,7 +1607,7 @@ class MessageHandler:
                 # Record command execution in stats database
                 if 'stats' in self.bot.command_manager.commands:
                     stats_command = self.bot.command_manager.commands['stats']
-                    if stats_command:
+                    if stats_command and not keyword == 'telegram_bridge':
                         stats_command.record_command(message, keyword, response is not None)
                 
                 # Note: Command data capture is handled in command_manager.py after execution
