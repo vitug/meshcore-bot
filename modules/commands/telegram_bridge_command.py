@@ -26,6 +26,13 @@ REPLY_MAPPING_LOCK = asyncio.Lock()
 # Множество чатов, куда уже отправляли chat_id
 CHAT_ID_SENT: set = set()
 
+# Настраиваемые разделители для имени в DM (можно менять на любые)
+DM_NAME_DELIMITERS = ('"', '"')  # открывающий и закрывающий символ
+# Альтернативы:
+# DM_NAME_DELIMITERS = ('[', ']')  # квадратные скобки
+# DM_NAME_DELIMITERS = ('«', '»')  # ёлочки
+# DM_NAME_DELIMITERS = ("'", "'")  # одинарные кавычки
+
 
 class TelegramBridgeCommand(BaseCommand):
     name = "telegram_bridge"
@@ -118,6 +125,9 @@ class TelegramBridgeCommand(BaseCommand):
         try:
             from telebot.async_telebot import AsyncTeleBot
             self.tg_bot = AsyncTeleBot(self.telegram_token)
+            
+            # Получаем разделители
+            open_delim, close_delim = DM_NAME_DELIMITERS
 
             # Команда /status — работает в любом регистре
             @self.tg_bot.message_handler(commands=['status', 'STATUS'])
@@ -150,7 +160,7 @@ class TelegramBridgeCommand(BaseCommand):
                     f"Команды:\n"
                     f"/ch #general текст — в канал\n"
                     f"/dm m4Sokol текст — в личку по ID\n"
-                    f"/dm [Shiva Sodedi] текст — в личку по имени\n"
+                    f"/dm {open_delim}Shiva Sodedi{close_delim} текст — в личку по имени\n"
                     f"/status — проверить состояние"
                 )
                 await self.tg_bot.reply_to(tg_message, welcome_text, parse_mode='HTML')
@@ -170,10 +180,10 @@ class TelegramBridgeCommand(BaseCommand):
                 if first_space == -1:
                     await self.tg_bot.reply_to(
                         tg_message, 
-                        "Использование:\n"
-                        "/ch #канал сообщение\n"
-                        "/dm node_id сообщение\n"
-                        "/dm [Имя Фамилия] сообщение"
+                        f"Использование:\n"
+                        f"/ch #канал сообщение\n"
+                        f"/dm node_id сообщение\n"
+                        f"/dm {open_delim}Имя Фамилия{close_delim} сообщение"
                     )
                     return
                 
@@ -187,15 +197,18 @@ class TelegramBridgeCommand(BaseCommand):
                 target_arg = ""
                 message_text = ""
                 
-                # Парсинг аргументов с учётом квадратных скобок
-                if rest.startswith('['):
-                    # Ищем закрывающую скобку
-                    bracket_end = rest.find(']')
-                    if bracket_end == -1:
-                        await self.tg_bot.reply_to(tg_message, "❌ Не найдена закрывающая скобка `]`")
+                # Парсинг аргументов с учётом настраиваемых разделителей
+                if rest.startswith(open_delim):
+                    # Ищем закрывающий разделитель
+                    delim_end = rest.find(close_delim, 1)  # ищем после первого символа
+                    if delim_end == -1:
+                        await self.tg_bot.reply_to(
+                            tg_message, 
+                            f"❌ Не найден закрывающий разделитель `{close_delim}`"
+                        )
                         return
-                    target_arg = rest[:bracket_end + 1]           # "[Имя Фамилия]"
-                    message_text = rest[bracket_end + 1:].strip() # текст после скобки
+                    target_arg = rest[:delim_end + 1]           # "Имя Фамилия" с разделителями
+                    message_text = rest[delim_end + 1:].strip() # текст после разделителя
                 else:
                     # Обычный формат: цель сообщение
                     parts = rest.split(maxsplit=1)
@@ -232,8 +245,9 @@ class TelegramBridgeCommand(BaseCommand):
                     target_node_id = None
                     display_target = target_arg
                     
-                    if target_arg.startswith('[') and target_arg.endswith(']'):
-                        # Поиск по имени
+                    # Проверяем, заключено ли имя в разделители
+                    if target_arg.startswith(open_delim) and target_arg.endswith(close_delim):
+                        # Поиск по имени — убираем разделители
                         target_name = target_arg[1:-1].strip()
                         target_node_id = target_name
                         display_target = f"{target_arg} ({target_node_id})"
@@ -295,7 +309,7 @@ class TelegramBridgeCommand(BaseCommand):
         except Exception as e:
             self.logger.error(f"Ошибка инициализации Telegram бота: {e}")
             self.enabled = False
-            
+
     async def _save_reply_mapping(self, sent_msg, original_mesh_msg: MeshMessage):
         """
         Потокобезопасное сохранение маппинга telegram_message_id → MeshMessage
