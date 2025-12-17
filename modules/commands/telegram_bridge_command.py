@@ -14,6 +14,7 @@ Telegram Bridge Command для MeshCore Bot
 
 import asyncio
 import threading
+import re
 from typing import Dict, Optional
 from .base_command import BaseCommand
 from ..models import MeshMessage
@@ -38,6 +39,7 @@ class TelegramBridgeCommand(BaseCommand):
         self.enabled = bot.config.getboolean('Telegram_Bridge', 'enabled', fallback=False)
         self.telegram_chat_id = bot.config.get('Telegram_Bridge', 'telegram_chat_id', fallback=None)
         self.telegram_token = bot.config.get('Telegram_Bridge', 'telegram_token', fallback=None)
+        self.default_channel = bot.config.get('Telegram_Bridge', 'default_channel', fallback=None)  # добавлено: канал по умолчанию для отправки из TG
         self.forward_channels = self._parse_forward_channels()
         self.include_dm = bot.config.getboolean('Telegram_Bridge', 'include_dm', fallback=False)
         self.prefix_sender = bot.config.getboolean('Telegram_Bridge', 'prefix_sender', fallback=True)
@@ -115,11 +117,10 @@ class TelegramBridgeCommand(BaseCommand):
         """Инициализация AsyncTeleBot с запуском поллинга в отдельном потоке"""
         try:
             from telebot.async_telebot import AsyncTeleBot
-
             self.tg_bot = AsyncTeleBot(self.telegram_token)
 
-            # Команда /status
-            @self.tg_bot.message_handler(commands=['status'])
+            # Команда /status — работает в любом регистре
+            @self.tg_bot.message_handler(commands=['status', 'STATUS'])
             async def handle_status(tg_message):
                 chat_id_str = str(tg_message.chat.id)
                 conn_status = "🟢 Подключено" if hasattr(self.bot.meshcore, 'connected') and self.bot.meshcore.connected else "🔴 Отключено"
@@ -135,62 +136,166 @@ class TelegramBridgeCommand(BaseCommand):
                 )
                 await self.tg_bot.reply_to(tg_message, status_text, parse_mode='HTML')
 
-            # Обработка всех сообщений из Telegram
+            # Команда /start — автоотправка chat_id (работает в любом регистре)
+            @self.tg_bot.message_handler(commands=['start', 'START'])
+            async def handle_start(tg_message):
+                if tg_message.chat.id in CHAT_ID_SENT:
+                    return  # уже отправляли — не спамим
+                welcome_text = (
+                    f"Привет! Это мост MeshCore ↔ Telegram.\n"
+                    f"<b>Chat ID этого чата:</b> <code>{tg_message.chat.id}</code>\n\n"
+                    f"Скопируйте и вставьте в config.ini:\n"
+                    f"<code>telegram_chat_id = {tg_message.chat.id}</code>\n\n"
+                    f"После перезапуска — сообщения из сети придут сюда.\n"
+                    f"Команды:\n"
+                    f"/ch #general текст — в канал\n"
+                    f"/dm m4Sokol текст — в личку по ID\n"
+                    f"/dm [Shiva Sodedi] текст — в личку по имени\n"
+                    f"/status — проверить состояние"
+                )
+                await self.tg_bot.reply_to(tg_message, welcome_text, parse_mode='HTML')
+                CHAT_ID_SENT.add(tg_message.chat.id)
+                self.logger.info(f"Автоматически отправлен chat_id {tg_message.chat.id}")
+
+            # Команды /ch и /dm — работают в любом регистре
+            @self.tg_bot.message_handler(commands=['ch', 'CH', 'dm', 'DM'])
+            async def handle_send_commands(tg_message):
+                if not (self.telegram_chat_id and str(tg_message.chat.id) == self.telegram_chat_id):
+                    return  # только в целевом чате
+
+                full_text = tg_message.text or ""
+                
+                # Извлекаем команду
+                first_space = full_text.find(' ')
+                if first_space == -1:
+                    await self.tg_bot.reply_to(
+                        tg_message, 
+                        "Использование:\n"
+                        "/ch #канал сообщение\n"
+                        "/dm node_id сообщение\n"
+                        "/dm [Имя Фамилия] сообщение"
+                    )
+                    return
+                
+                raw_command = full_text[1:first_space].lower()  # 'ch' или 'dm'
+                rest = full_text[first_space + 1:].strip()      # всё после команды
+                
+                if not rest:
+                    await self.tg_bot.reply_to(tg_message, f"Использование: /{raw_command} <цель> <сообщение>")
+                    return
+                
+                target_arg = ""
+                message_text = ""
+                
+                # Парсинг аргументов с учётом квадратных скобок
+                if rest.startswith('['):
+                    # Ищем закрывающую скобку
+                    bracket_end = rest.find(']')
+                    if bracket_end == -1:
+                        await self.tg_bot.reply_to(tg_message, "❌ Не найдена закрывающая скобка `]`")
+                        return
+                    target_arg = rest[:bracket_end + 1]           # "[Имя Фамилия]"
+                    message_text = rest[bracket_end + 1:].strip() # текст после скобки
+                else:
+                    # Обычный формат: цель сообщение
+                    parts = rest.split(maxsplit=1)
+                    target_arg = parts[0]
+                    message_text = parts[1] if len(parts) > 1 else ""
+                
+                # Проверка наличия текста сообщения
+                if not message_text:
+                    await self.tg_bot.reply_to(tg_message, f"❌ Не указан текст сообщения")
+                    return
+                
+                # Формируем подпись отправителя
+                sender_name = (
+                    tg_message.from_user.full_name or 
+                    tg_message.from_user.username or 
+                    "TG-User"
+                )
+                formatted_message = f"TG: {message_text}"
+                self.logger.info(f"Отправляем сообщение из тг от: {sender_name}")
+                
+                # === Обработка /ch ===
+                if raw_command == 'ch':
+                    channel_name = target_arg.lstrip('#')
+                    try:
+                        await self.bot.command_manager.send_channel_message(channel_name, formatted_message)
+                        await self.tg_bot.reply_to(tg_message, f"✅ Отправлено в канал #{channel_name}")
+                        self.logger.info(f"TG → канал #{channel_name}: {message_text}")
+                    except Exception as e:
+                        await self.tg_bot.reply_to(tg_message, f"❌ Ошибка отправки: {e}")
+                        self.logger.error(f"Ошибка отправки в канал: {e}")
+                
+                # === Обработка /dm ===
+                elif raw_command == 'dm':
+                    target_node_id = None
+                    display_target = target_arg
+                    
+                    if target_arg.startswith('[') and target_arg.endswith(']'):
+                        # Поиск по имени
+                        target_name = target_arg[1:-1].strip()
+                        target_node_id = target_name
+                        display_target = f"{target_arg} ({target_node_id})"
+                    else:
+                        # Прямой node_id
+                        target_node_id = target_arg
+                    
+                    try:
+                        success = await self.bot.command_manager.send_dm(target_node_id, formatted_message)
+                        if success:
+                            await self.tg_bot.reply_to(tg_message, f"✅ Отправлено в DM → {display_target}")
+                            self.logger.info(f"TG → DM {display_target}: {message_text}")
+                        else:
+                            await self.tg_bot.reply_to(tg_message, f"❌ сообщение не отправлено: {display_target}")
+                            self.logger.error(f"сообщение не отправлено для {display_target} ({target_node_id})")                        
+                    except Exception as e:
+                        await self.tg_bot.reply_to(tg_message, f"❌ Ошибка отправки: {e}")
+                        self.logger.error(f"Ошибка отправки DM: {e}")
+
+            # Обработка всех остальных сообщений
             @self.tg_bot.message_handler(func=lambda m: True)
             async def handle_telegram_message(tg_message):
                 chat_id_str = str(tg_message.chat.id)
-                # Авто-отправка chat_id при первом сообщении
-                if tg_message.chat.id not in CHAT_ID_SENT:
-                    welcome_text = (
-                        f"Привет! Это мост MeshCore ↔ Telegram.\n"
-                        f"<b>Chat ID этого чата:</b> <code>{tg_message.chat.id}</code>\n\n"
-                        f"Скопируйте и вставьте в config.ini:\n"
-                        f"<code>telegram_chat_id = {tg_message.chat.id}</code>\n\n"
-                        f"После перезапуска — сообщения из сети придут сюда.\n"
-                        f"/status — проверить состояние"
-                    )
-                    await self.tg_bot.reply_to(tg_message, welcome_text, parse_mode='HTML')
-                    CHAT_ID_SENT.add(tg_message.chat.id)
-                    self.logger.info(f"Автоматически отправлен chat_id {tg_message.chat.id}")
-                    return
 
-                # Ответы из TG в MeshCore (только в целевом чате)
+                # Ответы из TG в MeshCore (reply на сообщение бота)
                 if (tg_message.reply_to_message and
                     tg_message.reply_to_message.from_user.is_bot and
                     self.telegram_chat_id and
                     chat_id_str == self.telegram_chat_id):
-
                     async with REPLY_MAPPING_LOCK:
                         key = (tg_message.chat.id, tg_message.reply_to_message.message_id)
                         original_mesh_msg = REPLY_MAPPING.get(key)
-
                     if original_mesh_msg:
                         response_text = tg_message.text or tg_message.caption or "[медиа/стикер]"
-                        sender_name = (tg_message.from_user.full_name or
-                                       tg_message.from_user.username or
-                                       "TG-User")
-                        reply_text = f"Ответ от {sender_name} (TG):\n{response_text}"
-                        await self.bot.meshcore.commands.send_text(
-                            text=reply_text,
-                            channel=original_mesh_msg.channel,
-                            reply_id=original_mesh_msg.sender_id if original_mesh_msg.is_dm else None
-                        )
+                        reply_text = f"Ответ TG: {response_text}"
+                        if original_mesh_msg.is_dm:
+                            await self.bot.command_manager.send_dm(original_mesh_msg.sender_id, reply_text)
+                        else:
+                            await self.bot.command_manager.send_channel_message(original_mesh_msg.channel, reply_text)
                         self.logger.info(f"Ответ из TG отправлен в MeshCore")
+                        return
+
+                # Обычные сообщения (не команда и не ответ) → в default_channel
+                if self.telegram_chat_id and chat_id_str == self.telegram_chat_id and self.default_channel:
+                    text = tg_message.text or tg_message.caption or "[медиа/стикер]"
+                    if text.strip():
+                        full_text = f"TG: {text}"
+                        await self.bot.command_manager.send_channel_message(self.default_channel, full_text)
+                        self.logger.info(f"Сообщение из TG отправлено в default_channel #{self.default_channel}")
 
             # Запуск поллинга в отдельном потоке
             def run_polling():
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                self.tg_loop = loop  # Сохраняем loop для отправки из execute
+                self.tg_loop = loop
                 loop.run_until_complete(self.tg_bot.polling(none_stop=True, interval=1, timeout=60))
-
             threading.Thread(target=run_polling, daemon=True).start()
             self.logger.info("Telegram поллинг запущен в отдельном потоке")
-
         except Exception as e:
             self.logger.error(f"Ошибка инициализации Telegram бота: {e}")
             self.enabled = False
-
+            
     async def _save_reply_mapping(self, sent_msg, original_mesh_msg: MeshMessage):
         """
         Потокобезопасное сохранение маппинга telegram_message_id → MeshMessage
@@ -229,12 +334,12 @@ class TelegramBridgeCommand(BaseCommand):
         # Фоновая функция для обработки результата отправки
         def _handle_send_result():
             try:
-                sent_msg = future.result(timeout=30)  # Здесь можно ждать — это отдельный поток
+                sent_msg = future.result(timeout=30) # Здесь можно ждать — это отдельный поток
                 if sent_msg:
                     # Сохраняем маппинг в основном loop бота (потокобезопасно)
                     asyncio.run_coroutine_threadsafe(
                         self._save_reply_mapping(sent_msg, original_message),
-                        self.bot.loop  # основной event loop MeshCore бота
+                        self.bot.loop # основной event loop MeshCore бота
                     )
                     self.logger.info(f"Сообщение успешно переслано в Telegram (msg_id={sent_msg.message_id})")
             except Exception as e:
