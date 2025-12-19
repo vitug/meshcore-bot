@@ -164,7 +164,7 @@
       },
       "paths": {
         "none": "No path data",
-        "format": "{rank} {sender} {path}"
+        "format": "{rank} {sender} {path} {hops}ha"
       }
     },
     "solarforecast": {

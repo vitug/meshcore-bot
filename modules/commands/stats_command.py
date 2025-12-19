@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from .base_command import BaseCommand
 from ..models import MeshMessage
-
+import re
 
 class StatsCommand(BaseCommand):
     """Handles the stats command with comprehensive data collection"""
@@ -177,7 +177,7 @@ class StatsCommand(BaseCommand):
         # Only record if we have meaningful path data
         if not message.hops or message.hops <= 0 or not message.path:
             return
-        
+            
         # Only record paths that contain actual node IDs (hex characters or comma-separated)
         # Skip descriptive paths like "Routed through X hops"
         if not self._is_valid_path_format(message.path):
@@ -191,8 +191,12 @@ class StatsCommand(BaseCommand):
                 sender_id = f"user_{hashlib.md5(sender_id.encode()).hexdigest()[:8]}"
             
             # Format the path string properly (e.g., "75,24,1d,5f,bd")
-            path_string = self._format_path_for_display(message.path)
-            
+            clean_path = self._extract_clean_path(message.path)
+            if clean_path:
+                path_string = self._format_path_for_display(clean_path)
+            else:
+                return  # или path_string = message.path
+                        
             with sqlite3.connect(self.bot.db_manager.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
@@ -211,24 +215,31 @@ class StatsCommand(BaseCommand):
         except Exception as e:
             self.logger.error(f"Error recording path stats: {e}")
     
-    def _is_valid_path_format(self, path: str) -> bool:
-        """Check if path contains actual node IDs rather than descriptive text"""
+    def _extract_clean_path(self, path: str) -> Optional[str]:
+        """Извлекает чистую hex-часть пути, игнорируя скобки и текст"""
         if not path:
+            return None
+        
+        # Убираем всё в скобках и после них (например, " (5 hops)")
+        clean = re.sub(r'\s*\(.*?\)\s*', '', path).strip()
+        
+        # Если остались запятые — это уже чистый путь
+        if ',' in clean or (len(clean) >= 2 and all(c in '0123456789abcdefABCDEF' for c in clean)):
+            return clean
+        
+        return None
+    
+    def _is_valid_path_format(self, path: str) -> bool:
+        """Проверяет, содержит ли путь валидные node ID (даже со скобками)"""
+        clean_path = self._extract_clean_path(path)
+        if not clean_path:
             return False
         
-        # If path contains spaces and common descriptive words, it's likely descriptive text
-        descriptive_words = ['routed', 'through', 'hops', 'direct', 'unknown', 'path']
-        path_lower = path.lower()
-        
-        if any(word in path_lower for word in descriptive_words):
-            return False
-        
-        # If path contains only hex characters and commas, it's valid
-        if all(c in '0123456789abcdefABCDEF,' for c in path):
+        # Теперь проверяем только чистую часть
+        if all(c in '0123456789abcdefABCDEF,' for c in clean_path):
             return True
         
-        # If path is a single hex string without separators, it's valid
-        if all(c in '0123456789abcdefABCDEF' for c in path) and len(path) >= 2:
+        if all(c in '0123456789abcdefABCDEF' for c in clean_path) and len(clean_path) >= 2:
             return True
         
         return False
@@ -481,7 +492,8 @@ class StatsCommand(BaseCommand):
                         # Truncate sender name to fit more data
                         display_sender = sender[:8] + "..." if len(sender) > 11 else sender
                         # Compact format: "1 Gundam 56,1c,98,1a,aa,cd,5f"
-                        new_line = self.translate('commands.stats.paths.format', rank=i, sender=display_sender, path=path_str) + "\n"
+                        #new_line = self.translate('commands.stats.paths.format', rank=i, sender=display_sender, path=path_str) + "\n"
+                        new_line = self.translate('commands.stats.paths.format', rank=i, sender=display_sender, path=path_str, hops=path_len) + "\n"
                         
                         # Check if adding this line would exceed the limit
                         if len(response + new_line) > max_length:
