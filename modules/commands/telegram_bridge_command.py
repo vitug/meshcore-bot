@@ -29,6 +29,8 @@ REPLY_MAPPING: Dict[tuple, MeshMessage] = {}
 REPLY_MAPPING_LOCK_SYNC = Lock()           # Для синхронного кода (_handle_send_result)
 REPLY_MAPPING_LOCK_ASYNC = asyncio.Lock()  # Для асинхронного кода (handle_telegram_message)
 
+REPLY_MAPPING_MAX_MESSAGES = 1000
+
 # Множество чатов, куда уже отправляли chat_id
 CHAT_ID_SENT: set = set()
 
@@ -46,9 +48,6 @@ def get_async_lock():
         REPLY_MAPPING_LOCK_ASYNC = asyncio.Lock()
     return REPLY_MAPPING_LOCK_ASYNC
     
-# Множество чатов, куда уже отправляли chat_id
-CHAT_ID_SENT: set = set()
-
 class TelegramBridgeCommand(BaseCommand):
     name = "telegram_bridge"
     keywords = []
@@ -86,7 +85,7 @@ class TelegramBridgeCommand(BaseCommand):
 
         # Persist reply mapping в db (адаптация для MeshCore: persistent, чтобы пережить рестарт)
         self.persist_reply_mapping = self.bot.config.getboolean('Telegram_Bridge', 'persist_reply_mapping', fallback=True)
-        self.mapping_ttl_days = self.bot.config.getint('Telegram_Bridge', 'mapping_ttl_days', fallback=10)
+        self.mapping_ttl_days = self.bot.config.getint('Telegram_Bridge', 'mapping_ttl_days', fallback=7)
 
         if self.persist_reply_mapping:
             try:
@@ -396,8 +395,13 @@ class TelegramBridgeCommand(BaseCommand):
                         return  # Важно: прерываем обработку, чтобы не уйти в default_channel
                      
                     if original_mesh_msg:
+                        sender_id = original_mesh_msg.sender_id
+                        is_dm = original_mesh_msg.is_dm
                         response_text = tg_message.text or tg_message.caption or "[медиа/стикер]"
-                        reply_text = f"Ответ TG: {response_text}"
+                        if is_dm:
+                            reply_text = f"TG:{response_text}"
+                        else:
+                            reply_text = f"TG:@[{sender_id}] {response_text}"
                         if original_mesh_msg.is_dm:
                             await self.bot.command_manager.send_dm(original_mesh_msg.sender_id, reply_text)
                         else:
@@ -437,7 +441,7 @@ class TelegramBridgeCommand(BaseCommand):
             REPLY_MAPPING[key] = original_mesh_msg
             self.logger.info(f"Mapping сохранён в памяти для key={key} (всего записей: {len(REPLY_MAPPING)})")
 
-            if len(REPLY_MAPPING) > 1000:
+            if len(REPLY_MAPPING) > REPLY_MAPPING_MAX_MESSAGES:
                 keys_to_remove = sorted(REPLY_MAPPING.keys(), key=lambda k: k[1])[:200]
                 for k in keys_to_remove:
                     REPLY_MAPPING.pop(k, None)
@@ -489,24 +493,23 @@ class TelegramBridgeCommand(BaseCommand):
         
         # Фоновая функция для обработки результата отправки
         def _handle_send_result():
-            self.logger.info("=== _handle_send_result запущен ===")
             try:
                 sent_msg = future.result(timeout=30)
                 if sent_msg:
-                    self.logger.info(f"Успешная отправка в TG, msg_id={sent_msg.message_id} — сохраняем mapping синхронно")
+                    self.logger.debug(f"Успешная отправка в TG, msg_id={sent_msg.message_id} — сохраняем mapping синхронно")
 
                     key = (sent_msg.chat.id, sent_msg.message_id)
                     if not original_mesh_msg==None:
                         REPLY_MAPPING_LOCK_SYNC.acquire()
                         try:
                             REPLY_MAPPING[key] = original_mesh_msg
-                            self.logger.info(f"Mapping сохранён в памяти для key={key} (всего: {len(REPLY_MAPPING)})")
+                            self.logger.debug(f"Mapping сохранён в памяти для key={key} (всего: {len(REPLY_MAPPING)})")
 
-                            if len(REPLY_MAPPING) > 1000:
+                            if len(REPLY_MAPPING) > REPLY_MAPPING_MAX_MESSAGES:
                                 keys_to_remove = sorted(REPLY_MAPPING.keys(), key=lambda k: k[1])[:200]
                                 for k in keys_to_remove:
                                     REPLY_MAPPING.pop(k, None)
-                                self.logger.info("Очищено 200 старых записей из памяти")
+                                self.logger.debug("Очищено 200 старых записей из памяти")
                         finally:
                             REPLY_MAPPING_LOCK_SYNC.release()
 
@@ -535,8 +538,6 @@ class TelegramBridgeCommand(BaseCommand):
                     self.logger.warning("Telegram API вернул None — mapping не сохранён")
             except Exception as e:
                 self.logger.error(f"Ошибка в _handle_send_result: {e}", exc_info=True)
-            finally:
-                self.logger.info("=== _handle_send_result завершён ===")
 
         # Запускаем обработку результата в отдельном daemon-потоке
         threading.Thread(target=_handle_send_result, daemon=True).start()
