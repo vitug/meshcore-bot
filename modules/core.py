@@ -862,6 +862,18 @@ use_zulu_time = false
         # Send startup advert if enabled
         await self.send_startup_advert()
         
+        # === Загрузка persistent reply mapping для Telegram Bridge ===
+        # Выполняется в самом конце инициализации, когда всё готово
+        telegram_bridge = self.command_manager.get_plugin_by_name('telegram_bridge')
+        if telegram_bridge and hasattr(telegram_bridge, 'load_reply_mapping_from_db'):
+            try:
+                await telegram_bridge.load_reply_mapping_from_db()
+                self.logger.info("Persistent reply mapping успешно загружен из БД")
+            except Exception as e:
+                self.logger.error(f"Ошибка при загрузке persistent reply mapping: {e}", exc_info=True)
+        else:
+            self.logger.debug("Telegram Bridge плагин не найден или не имеет метода загрузки mapping")
+            
         # Keep running
         self.logger.info("Bot is running. Press Ctrl+C to stop.")
         try:
