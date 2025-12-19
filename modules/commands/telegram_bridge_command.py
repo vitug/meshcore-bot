@@ -18,10 +18,16 @@ import re
 from typing import Dict, Optional
 from .base_command import BaseCommand
 from ..models import MeshMessage
+from threading import Lock
 
 # Глобальный словарь: telegram_message_id → исходное MeshMessage (для ответов)
 REPLY_MAPPING: Dict[tuple, MeshMessage] = {}
-REPLY_MAPPING_LOCK = asyncio.Lock()
+
+# REPLY_MAPPING_LOCK = asyncio.Lock()
+# REPLY_MAPPING_LOCK = Lock()
+# ДВА РАЗНЫХ ЛОКА:
+REPLY_MAPPING_LOCK_SYNC = Lock()           # Для синхронного кода (_handle_send_result)
+REPLY_MAPPING_LOCK_ASYNC = asyncio.Lock()  # Для асинхронного кода (handle_telegram_message)
 
 # Множество чатов, куда уже отправляли chat_id
 CHAT_ID_SENT: set = set()
@@ -33,6 +39,15 @@ DM_NAME_DELIMITERS = ('"', '"')  # открывающий и закрывающ�
 # DM_NAME_DELIMITERS = ('«', '»')  # ёлочки
 # DM_NAME_DELIMITERS = ("'", "'")  # одинарные кавычки
 
+def get_async_lock():
+    """Ленивая инициализация asyncio.Lock в правильном event loop"""
+    global REPLY_MAPPING_LOCK_ASYNC
+    if REPLY_MAPPING_LOCK_ASYNC is None:
+        REPLY_MAPPING_LOCK_ASYNC = asyncio.Lock()
+    return REPLY_MAPPING_LOCK_ASYNC
+    
+# Множество чатов, куда уже отправляли chat_id
+CHAT_ID_SENT: set = set()
 
 class TelegramBridgeCommand(BaseCommand):
     name = "telegram_bridge"
@@ -69,6 +84,68 @@ class TelegramBridgeCommand(BaseCommand):
         else:
             self.logger.info("Telegram Bridge включён (chat_id не указан — пересылка из MeshCore отключена, только авто-определение chat_id)")
 
+        # Persist reply mapping в db (адаптация для MeshCore: persistent, чтобы пережить рестарт)
+        self.persist_reply_mapping = self.bot.config.getboolean('Telegram_Bridge', 'persist_reply_mapping', fallback=True)
+        self.mapping_ttl_days = self.bot.config.getint('Telegram_Bridge', 'mapping_ttl_days', fallback=10)
+
+        if self.persist_reply_mapping:
+            try:
+                # Создаём таблицу (синхронно — db_manager синхронный)
+                self.bot.db_manager.create_table('reply_mapping', '''
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    msg_id INTEGER NOT NULL,
+                    sender_id TEXT NOT NULL,
+                    channel TEXT,
+                    is_dm BOOLEAN NOT NULL,
+                    content TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ''')
+
+                self.bot.db_manager.execute_update('''
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_reply_key ON reply_mapping (chat_id, msg_id)
+                ''')
+
+                # Чистка старых записей
+                ttl_seconds = self.mapping_ttl_days * 86400
+                self.bot.db_manager.execute_update('''
+                    DELETE FROM reply_mapping 
+                    WHERE timestamp < datetime('now', '-' || ? || ' seconds')
+                ''', (ttl_seconds,))
+
+                self.logger.info(f"Persist reply mapping включён (TTL: {self.mapping_ttl_days} дней). Таблица подготовлена.")
+
+            except Exception as e:
+                self.logger.error(f"Ошибка инициализации persist mapping: {e}", exc_info=True)          
+    
+    async def load_reply_mapping_from_db(self):
+        """Асинхронная загрузка mapping из БД в память при старте"""
+        if not self.persist_reply_mapping:
+            return
+
+        try:
+            rows = self.bot.db_manager.execute_query('''
+                SELECT chat_id, msg_id, sender_id, channel, is_dm, content
+                FROM reply_mapping
+                ORDER BY timestamp DESC
+            ''')
+
+            async with get_async_lock():
+                loaded_count = 0
+                for row in rows:
+                    key = (row['chat_id'], row['msg_id'])
+                    REPLY_MAPPING[key] = MeshMessage(
+                        content=row['content'] or '',
+                        sender_id=row['sender_id'],
+                        channel=row['channel'],
+                        is_dm=bool(row['is_dm'])
+                    )
+                    loaded_count += 1
+
+            self.logger.info(f"Успешно загружено {loaded_count} записей reply mapping из БД в память")
+        except Exception as e:
+            self.logger.error(f"Ошибка при загрузке reply mapping из БД: {e}", exc_info=True)
+        
     def matches_keyword(self, message: MeshMessage) -> bool:
         """Глобальный Telegram-мост — получаем все сообщения для проверки should_execute"""
         return False
@@ -277,9 +354,47 @@ class TelegramBridgeCommand(BaseCommand):
                     tg_message.reply_to_message.from_user.is_bot and
                     self.telegram_chat_id and
                     chat_id_str == self.telegram_chat_id):
-                    async with REPLY_MAPPING_LOCK:
+                    async with get_async_lock():
                         key = (tg_message.chat.id, tg_message.reply_to_message.message_id)
                         original_mesh_msg = REPLY_MAPPING.get(key)
+                        
+                    if self.persist_reply_mapping and original_mesh_msg is None:
+                        # Fallback на db
+                        db_result = self.bot.db_manager.execute_query('''
+                            SELECT sender_id, channel, is_dm, content 
+                            FROM reply_mapping 
+                            WHERE chat_id = ? AND msg_id = ?
+                        ''', (key[0], key[1]))
+                        if db_result:
+                            row = db_result[0]
+                            original_mesh_msg = MeshMessage(  # Реконструируем объект из models.py
+                                content=row['content'] or '',
+                                sender_id=row['sender_id'],
+                                channel=row['channel'],
+                                is_dm=bool(row['is_dm'])
+                            )
+                            self.logger.info(f"Mapping восстановлен из db для key={key}")
+        
+                    if original_mesh_msg is None:
+                        # логируем содержимое mapping при ошибке
+                        self.logger.warning(f"Mapping не найден для reply (key={key})")
+                        async with get_async_lock():
+                            if REPLY_MAPPING:
+                                self.logger.debug("Текущее содержимое REPLY_MAPPING (последние 10 записей):")
+                                # Выводим только последние 10 элементов, чтобы не засорять лог
+                                for map_key, map_value in list(REPLY_MAPPING.items())[-10:]:
+                                    self.logger.debug(
+                                        f"  Ключ: {map_key} | "
+                                        f"sender_id={getattr(map_value, 'sender_id', 'None')} | "
+                                        f"channel={getattr(map_value, 'channel', 'None')} | "
+                                        f"is_dm={getattr(map_value, 'is_dm', 'None')}"
+                                    )
+                            else:
+                                self.logger.debug("REPLY_MAPPING полностью пустой")
+                        # Уведомляем пользователя в Telegram
+                        await self.tg_bot.reply_to(tg_message, "❌ Ответ не доставлен: исходное сообщение устарело или mapping потерян")
+                        return  # Важно: прерываем обработку, чтобы не уйти в default_channel
+                     
                     if original_mesh_msg:
                         response_text = tg_message.text or tg_message.caption or "[медиа/стикер]"
                         reply_text = f"Ответ TG: {response_text}"
@@ -312,17 +427,41 @@ class TelegramBridgeCommand(BaseCommand):
 
     async def _save_reply_mapping(self, sent_msg, original_mesh_msg: MeshMessage):
         """
-        Потокобезопасное сохранение маппинга telegram_message_id → MeshMessage
-        Вызывается из фонового потока, но сохраняет данные в основном loop бота
-        """
-        async with REPLY_MAPPING_LOCK:
+        Потокобезопасное сохранение маппинга telegram_message_id → MeshMessage
+        Вызывается из фонового потока, но сохраняет данные в основном loop бота
+        """    
+        self.logger.info(f"Начало сохранения mapping для msg_id={sent_msg.message_id} от {original_mesh_msg.sender_id}")
+
+        async with get_async_lock():
             key = (sent_msg.chat.id, sent_msg.message_id)
             REPLY_MAPPING[key] = original_mesh_msg
+            self.logger.info(f"Mapping сохранён в памяти для key={key} (всего записей: {len(REPLY_MAPPING)})")
+
             if len(REPLY_MAPPING) > 1000:
-                # Удаляем самые старые записи для экономии памяти
                 keys_to_remove = sorted(REPLY_MAPPING.keys(), key=lambda k: k[1])[:200]
                 for k in keys_to_remove:
                     REPLY_MAPPING.pop(k, None)
+                self.logger.info(f"Очищено 200 старых записей из памяти")
+
+        if self.persist_reply_mapping:
+            try:
+                save_content = self.bot.config.getboolean('Telegram_Bridge', 'save_reply_content', fallback=False)
+                content_value = original_mesh_msg.content if save_content else None
+
+                self.bot.db_manager.execute_update('''
+                    INSERT OR REPLACE INTO reply_mapping
+                    (chat_id, msg_id, sender_id, channel, is_dm, content)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    key[0], key[1],
+                    original_mesh_msg.sender_id or '',
+                    original_mesh_msg.channel,
+                    int(original_mesh_msg.is_dm),
+                    content_value
+                ))
+                self.logger.info(f"Mapping успешно сохранён в БД для key={key}")
+            except Exception as db_e:
+                self.logger.error(f"Ошибка сохранения mapping в БД: {db_e}", exc_info=True)                  
 
     async def _send_to_telegram_non_blocking(self, chat_id: str, text: str, original_message: MeshMessage):
         """
@@ -345,19 +484,59 @@ class TelegramBridgeCommand(BaseCommand):
         # Запускаем её в Telegram-loop (другой поток)
         future = asyncio.run_coroutine_threadsafe(coro, self.tg_loop)
 
+        # Замыкаем original_mesh_msg в локальную переменную, чтобы она была доступна в _handle_send_result
+        original_mesh_msg = original_message
+        
         # Фоновая функция для обработки результата отправки
         def _handle_send_result():
+            self.logger.info("=== _handle_send_result запущен ===")
             try:
-                sent_msg = future.result(timeout=30) # Здесь можно ждать — это отдельный поток
+                sent_msg = future.result(timeout=30)
                 if sent_msg:
-                    # Сохраняем маппинг в основном loop бота (потокобезопасно)
-                    asyncio.run_coroutine_threadsafe(
-                        self._save_reply_mapping(sent_msg, original_message),
-                        self.bot.loop # основной event loop MeshCore бота
-                    )
+                    self.logger.info(f"Успешная отправка в TG, msg_id={sent_msg.message_id} — сохраняем mapping синхронно")
+
+                    key = (sent_msg.chat.id, sent_msg.message_id)
+                    if not original_mesh_msg==None:
+                        REPLY_MAPPING_LOCK_SYNC.acquire()
+                        try:
+                            REPLY_MAPPING[key] = original_mesh_msg
+                            self.logger.info(f"Mapping сохранён в памяти для key={key} (всего: {len(REPLY_MAPPING)})")
+
+                            if len(REPLY_MAPPING) > 1000:
+                                keys_to_remove = sorted(REPLY_MAPPING.keys(), key=lambda k: k[1])[:200]
+                                for k in keys_to_remove:
+                                    REPLY_MAPPING.pop(k, None)
+                                self.logger.info("Очищено 200 старых записей из памяти")
+                        finally:
+                            REPLY_MAPPING_LOCK_SYNC.release()
+
+                        if self.persist_reply_mapping:
+                            try:
+                                save_content = self.bot.config.getboolean('Telegram_Bridge', 'save_reply_content', fallback=False)
+                                content_value = original_mesh_msg.content if save_content else None
+
+                                self.bot.db_manager.execute_update('''
+                                    INSERT OR REPLACE INTO reply_mapping
+                                    (chat_id, msg_id, sender_id, channel, is_dm, content)
+                                    VALUES (?, ?, ?, ?, ?, ?)
+                                ''', (
+                                    key[0], key[1],
+                                    original_mesh_msg.sender_id or '',
+                                    original_mesh_msg.channel,
+                                    int(original_mesh_msg.is_dm),
+                                    content_value
+                                ))
+                                self.logger.info(f"Mapping успешно сохранён в БД для key={key}")
+                            except Exception as db_e:
+                                self.logger.error(f"Ошибка сохранения в БД: {db_e}", exc_info=True)
+
                     self.logger.info(f"Сообщение успешно переслано в Telegram (msg_id={sent_msg.message_id})")
+                else:
+                    self.logger.warning("Telegram API вернул None — mapping не сохранён")
             except Exception as e:
-                self.logger.error(f"Ошибка при отправке в Telegram: {e}", exc_info=True)
+                self.logger.error(f"Ошибка в _handle_send_result: {e}", exc_info=True)
+            finally:
+                self.logger.info("=== _handle_send_result завершён ===")
 
         # Запускаем обработку результата в отдельном daemon-потоке
         threading.Thread(target=_handle_send_result, daemon=True).start()
