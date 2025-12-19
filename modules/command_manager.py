@@ -545,7 +545,7 @@ class CommandManager:
 
         try:
             bot_name = "#" + self.bot.config.get('Bot', 'bot_name', fallback='MeshCoreBot')
-            full_text = f"🤖 <b>{bot_name}</b>: {content}"
+            full_text = f"🤖 {bot_name}: {content}"
 
             asyncio.create_task(
                 bridge._send_to_telegram_non_blocking(
