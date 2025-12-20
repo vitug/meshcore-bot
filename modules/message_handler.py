@@ -103,7 +103,7 @@ class MessageHandler:
             # Fallback to basic path logic if no detailed info found
             if path_info == "Unknown":
                 if path_len == 255:
-                    path_info = "Direct"
+                    path_info = "Unknown/Direct"
                 elif path_len > 0:
                     path_info = f"Routed ({path_len} hops)"
                 elif path_len == 0:
@@ -241,7 +241,7 @@ class MessageHandler:
             # Use the path_len from the payload (255 means unknown/direct)
             path_len = payload.get('path_len', 255)
             if path_len == 255:
-                path_info = "Direct (0 hops)"
+                path_info = "Unknown/Direct"
             else:
                 path_info = f"Routed through {path_len} hops"
             
