@@ -10,7 +10,9 @@ Telegram Bridge Command для MeshCore Bot
 + Исправлена отправка из другого потока через run_coroutine_threadsafe
 + ОТПРАВКА В TELEGRAM ПОЛНОСТЬЮ АСИНХРОННАЯ — НЕ БЛОКИРУЕТ ОСНОВНОЙ ЦИКЛ БОТА
 + АВТОМАТИЧЕСКАЯ РАЗБИВКА СООБЩЕНИЙ ИЗ TG НА ЧАСТИ ПО 140 БАЙТ (макс. 3 сообщения)
-+ ТРАНСЛИТЕРАЦИЯ кириллицы если сообщение не помещается в лимит
++ ТРАНСЛИТЕРАЦИЯ кириллицы:
+  - Автоматическая (auto_translit=true) — если сообщение не помещается в лимит
+  - Принудительная (/tl команда) — всегда транслитерирует
 """
 
 import asyncio
@@ -226,14 +228,22 @@ class TelegramBridgeCommand(BaseCommand):
         self.max_mesh_parts = bot.config.getint('Telegram_Bridge', 'max_mesh_parts', fallback=MAX_MESH_MESSAGES)
         self.smart_split = bot.config.getboolean('Telegram_Bridge', 'smart_split', fallback=True)
         
-        # Настройка транслитерации
+        # ====================================================================
+        # НАСТРОЙКИ ТРАНСЛИТЕРАЦИИ
+        # ====================================================================
+        # auto_translit = true  — транслитерировать автоматически если не помещается
+        # auto_translit = false — транслитерировать только по команде /tl
+        # force_translit = true — ВСЕГДА транслитерировать все сообщения
         self.auto_translit = bot.config.getboolean('Telegram_Bridge', 'auto_translit', fallback=True)
+        self.force_translit = bot.config.getboolean('Telegram_Bridge', 'force_translit', fallback=False)
         
         # Rate limit
         self.rate_limit_seconds = bot.config.getfloat('Bot', 'rate_limit_seconds', fallback=2.0)
+        
+        translit_mode = "принудительно" if self.force_translit else ("авто" if self.auto_translit else "по команде /tl")
         self.logger.info(
             f"Настройки: {self.max_mesh_bytes} байт, макс. {self.max_mesh_parts} частей, "
-            f"транслит={self.auto_translit}, задержка {self.rate_limit_seconds}с"
+            f"транслит={translit_mode}, задержка {self.rate_limit_seconds}с"
         )
         
         if not self.enabled:
@@ -376,22 +386,24 @@ class TelegramBridgeCommand(BaseCommand):
         message_text: str,
         target: str,
         is_dm: bool,
-        prefix: str = "TG: "
+        prefix: str = "TG: ",
+        force_translit: bool = False
     ) -> Tuple[int, int, bool]:
         """
         Подготавливает и отправляет сообщение в MeshCore.
         
-        Логика:
-        1. Проверяет размер сообщения с префиксом
-        2. Если не помещается в лимит И есть кириллица — применяет транслитерацию
-        3. Разбивает на части если нужно
-        4. Отправляет все части с задержками
+        Логика транслитерации:
+        1. force_translit=True (команда /tl) — ВСЕГДА транслитерировать
+        2. self.force_translit=True (конфиг) — ВСЕГДА транслитерировать все
+        3. self.auto_translit=True — транслитерировать если не помещается в лимит
+        4. Иначе — не транслитерировать
         
         Args:
             message_text: Текст сообщения (без префикса)
             target: Цель — канал (с # или без) или node_id для DM
             is_dm: True для личных сообщений, False для канала
             prefix: Префикс сообщения (например "TG: " или "TG:@[id] ")
+            force_translit: Принудительная транслитерация (команда /tl)
         
         Returns:
             Tuple (sent_count, total_parts, was_transliterated):
@@ -402,22 +414,34 @@ class TelegramBridgeCommand(BaseCommand):
         was_transliterated = False
         text_to_send = message_text
         
-        # Проверяем нужна ли транслитерация
-        if self.auto_translit:
-            # Оцениваем размер полного сообщения (без номера части)
+        # Определяем нужна ли транслитерация
+        should_translit = False
+        
+        if force_translit or self.force_translit:
+            # Принудительная транслитерация (команда /tl или force_translit в конфиге)
+            should_translit = has_cyrillic(text_to_send)
+            if should_translit:
+                self.logger.debug("Принудительная транслитерация активирована")
+        elif self.auto_translit:
+            # Автоматическая транслитерация — только если не помещается
             full_test = f"{prefix}{text_to_send}"
             full_size = len(full_test.encode('utf-8'))
             
             if full_size > self.max_mesh_bytes and has_cyrillic(text_to_send):
-                # Применяем транслитерацию
-                text_to_send = transliterate_ru_to_en(text_to_send)
-                was_transliterated = True
-                new_size = len(f"{prefix}{text_to_send}".encode('utf-8'))
-                self.logger.info(
-                    f"Транслитерация применена: {full_size} байт → {new_size} байт"
-                )
+                should_translit = True
+                self.logger.debug(f"Авто-транслитерация: {full_size} байт > {self.max_mesh_bytes}")
         
-        # Разбиваем на части (учитывая что разбивка уже учтёт размер)
+        # Применяем транслитерацию если нужно
+        if should_translit:
+            original_size = len(f"{prefix}{text_to_send}".encode('utf-8'))
+            text_to_send = transliterate_ru_to_en(text_to_send)
+            was_transliterated = True
+            new_size = len(f"{prefix}{text_to_send}".encode('utf-8'))
+            self.logger.info(
+                f"Транслитерация применена: {original_size} байт → {new_size} байт"
+            )
+        
+        # Разбиваем на части
         message_parts = self._split_outgoing_message(text_to_send)
         total_parts = len(message_parts)
         
@@ -479,14 +503,14 @@ class TelegramBridgeCommand(BaseCommand):
         
         details = []
         if was_transliterated:
-            details.append("транслит")
+            details.append("🔤 транслит")
         if total_parts > 1:
-            details.append(f"{total_parts} частей")
+            details.append(f"📦 {total_parts} частей")
         if original_bytes > self.max_mesh_bytes:
             details.append(f"{original_bytes} байт")
         
         if details:
-            result += f"\n📦 {', '.join(details)}"
+            result += f"\n{', '.join(details)}"
         
         return result
 
@@ -503,7 +527,15 @@ class TelegramBridgeCommand(BaseCommand):
                 conn_status = "🟢 Подключено" if hasattr(self.bot.meshcore, 'connected') and self.bot.meshcore.connected else "🔴 Отключено"
                 bridge_status = "✅ Активен" if self.enabled and self.telegram_chat_id else "⚠️ Ожидает chat_id"
                 target_chat = self.telegram_chat_id or "не указан"
-                translit_status = "✅" if self.auto_translit else "❌"
+                
+                # Статус транслитерации
+                if self.force_translit:
+                    translit_status = "🔤 Принудительно (все сообщения)"
+                elif self.auto_translit:
+                    translit_status = "🔄 Авто (если не помещается)"
+                else:
+                    translit_status = "📝 По команде /tl"
+                
                 status_text = (
                     f"📡 <b>Статус Telegram Bridge</b>\n\n"
                     f"Мост: {bridge_status}\n"
@@ -511,8 +543,12 @@ class TelegramBridgeCommand(BaseCommand):
                     f"Целевой чат: <code>{target_chat}</code>\n"
                     f"Текущий чат: <code>{tg_message.chat.id}</code>\n"
                     f"Макс. байт: {self.max_mesh_bytes}, макс. частей: {self.max_mesh_parts}\n"
-                    f"Авто-транслит: {translit_status}\n\n"
-                    f"Если chat_id не совпадает — укажите в config.ini."
+                    f"Транслитерация: {translit_status}\n\n"
+                    f"<b>Команды:</b>\n"
+                    f"/ch #канал текст — в канал\n"
+                    f"/dm node_id текст — в личку\n"
+                    f"/tlch #канал текст — в канал с транслитом\n"
+                    f"/tldm node_id текст — в личку с транслитом"
                 )
                 await self.tg_bot.reply_to(tg_message, status_text, parse_mode='HTML')
 
@@ -520,17 +556,27 @@ class TelegramBridgeCommand(BaseCommand):
             async def handle_start(tg_message):
                 if tg_message.chat.id in CHAT_ID_SENT:
                     return
-                translit_note = "\n🔤 Длинные сообщения на кириллице автоматически транслитерируются." if self.auto_translit else ""
+                    
+                # Статус транслитерации для приветствия
+                if self.force_translit:
+                    translit_note = "\n🔤 Все сообщения автоматически транслитерируются (force_translit=true)."
+                elif self.auto_translit:
+                    translit_note = "\n🔄 Длинные сообщения на кириллице автоматически транслитерируются."
+                else:
+                    translit_note = "\n📝 Для транслитерации используйте команды /tlch и /tldm."
+                
                 welcome_text = (
                     f"Привет! Это мост MeshCore ↔ Telegram.\n"
                     f"<b>Chat ID этого чата:</b> <code>{tg_message.chat.id}</code>\n\n"
                     f"Скопируйте и вставьте в config.ini:\n"
                     f"<code>telegram_chat_id = {tg_message.chat.id}</code>\n\n"
-                    f"После перезапуска — сообщения из сети придут сюда.\n"
-                    f"Команды:\n"
+                    f"После перезапуска — сообщения из сети придут сюда.\n\n"
+                    f"<b>Команды:</b>\n"
                     f"/ch #general текст — в канал\n"
                     f"/dm m4Sokol текст — в личку по ID\n"
                     f"/dm {open_delim}Имя Фамилия{close_delim} текст — в личку по имени\n"
+                    f"/tlch #general текст — в канал <b>с транслитом</b>\n"
+                    f"/tldm m4Sokol текст — в личку <b>с транслитом</b>\n"
                     f"/status — проверить состояние\n\n"
                     f"⚠️ Длинные сообщения разбиваются на части по {self.max_mesh_bytes} байт (макс. {self.max_mesh_parts} шт.)"
                     f"{translit_note}"
@@ -538,7 +584,10 @@ class TelegramBridgeCommand(BaseCommand):
                 await self.tg_bot.reply_to(tg_message, welcome_text, parse_mode='HTML')
                 CHAT_ID_SENT.add(tg_message.chat.id)
 
-            @self.tg_bot.message_handler(commands=['ch', 'dm'])
+            # ================================================================
+            # ОБРАБОТЧИК КОМАНД: /ch, /dm, /tlch, /tldm
+            # ================================================================
+            @self.tg_bot.message_handler(commands=['ch', 'CH', 'dm', 'DM', 'tlch', 'Tlch', 'tldm', 'Tldm'])
             async def handle_send_commands(tg_message):
                 if not (self.telegram_chat_id and str(tg_message.chat.id) == self.telegram_chat_id):
                     return
@@ -549,10 +598,13 @@ class TelegramBridgeCommand(BaseCommand):
                 if first_space == -1:
                     await self.tg_bot.reply_to(
                         tg_message, 
-                        f"Использование:\n"
-                        f"/ch #канал сообщение\n"
-                        f"/dm node_id сообщение\n"
-                        f"/dm {open_delim}Имя Фамилия{close_delim} сообщение"
+                        f"<b>Использование:</b>\n"
+                        f"/ch #канал сообщение — в канал\n"
+                        f"/dm node_id сообщение — в личку\n"
+                        f"/tlch #канал сообщение — в канал с транслитом\n"
+                        f"/tldm node_id сообщение — в личку с транслитом\n"
+                        f"/dm {open_delim}Имя Фамилия{close_delim} сообщение — в личку по имени",
+                        parse_mode='HTML'
                     )
                     return
                 
@@ -562,6 +614,10 @@ class TelegramBridgeCommand(BaseCommand):
                 if not rest:
                     await self.tg_bot.reply_to(tg_message, f"Использование: /{raw_command} <цель> <сообщение>")
                     return
+                
+                # Определяем тип команды
+                force_translit_cmd = raw_command in ['tlch', 'tldm']
+                is_dm_cmd = raw_command in ['dm', 'tldm']
                 
                 # Парсинг target и message_text
                 if rest.startswith(open_delim):
@@ -583,8 +639,8 @@ class TelegramBridgeCommand(BaseCommand):
                 original_bytes = len(message_text.encode('utf-8'))
                 prefix = "TG: "
                 
-                # === /ch — отправка в канал ===
-                if raw_command == 'ch':
+                # === /ch или /tlch — отправка в канал ===
+                if not is_dm_cmd:
                     channel_name = target_arg
                     
                     try:
@@ -592,7 +648,8 @@ class TelegramBridgeCommand(BaseCommand):
                             message_text=message_text,
                             target=channel_name,
                             is_dm=False,
-                            prefix=prefix
+                            prefix=prefix,
+                            force_translit=force_translit_cmd
                         )
                         
                         result_msg = self._format_send_result(
@@ -605,8 +662,8 @@ class TelegramBridgeCommand(BaseCommand):
                         await self.tg_bot.reply_to(tg_message, f"❌ Ошибка отправки: {e}")
                         self.logger.error(f"Ошибка отправки в канал: {e}")
                 
-                # === /dm — отправка в личку ===
-                elif raw_command == 'dm':
+                # === /dm или /tldm — отправка в личку ===
+                else:
                     display_target = target_arg
                     
                     if target_arg.startswith(open_delim) and target_arg.endswith(close_delim):
@@ -620,7 +677,8 @@ class TelegramBridgeCommand(BaseCommand):
                             message_text=message_text,
                             target=target_node_id,
                             is_dm=True,
-                            prefix=prefix
+                            prefix=prefix,
+                            force_translit=force_translit_cmd
                         )
                         
                         result_msg = self._format_send_result(
@@ -664,7 +722,6 @@ class TelegramBridgeCommand(BaseCommand):
                             )
         
                     if original_mesh_msg is None:
-                        # логируем содержимое mapping при ошибке
                         self.logger.warning(f"Mapping не найден для reply (key={key})")
                         await self.tg_bot.reply_to(tg_message, "❌ Ответ не доставлен: исходное сообщение устарело")
                         return
@@ -683,11 +740,13 @@ class TelegramBridgeCommand(BaseCommand):
                     
                     original_bytes = len(response_text.encode('utf-8'))
                     
+                    # Reply всегда использует настройки auto_translit/force_translit из конфига
                     sent_count, total_parts, was_translit = await self._prepare_and_send_to_mesh(
                         message_text=response_text,
                         target=target,
                         is_dm=is_dm,
-                        prefix=prefix
+                        prefix=prefix,
+                        force_translit=False  # Используем настройки из конфига
                     )
                     
                     if sent_count == total_parts:
@@ -710,7 +769,8 @@ class TelegramBridgeCommand(BaseCommand):
                             message_text=text,
                             target=self.default_channel,
                             is_dm=False,
-                            prefix="TG: "
+                            prefix="TG: ",
+                            force_translit=False  # Используем настройки из конфига
                         )
                         detail = f" (транслит)" if was_translit else ""
                         self.logger.info(
