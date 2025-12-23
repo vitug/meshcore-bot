@@ -509,6 +509,22 @@ class BaseCommand(ABC):
         response_format = self.get_response_format()
         if response_format:
             response = self.format_response(message, response_format)
+            
+            # Веб-интеграция для команд ping, test и др.
+            self.logger.info(f"Веб-интеграция для команды {self.name}");
+            if (hasattr(self.bot, 'web_viewer_integration') and 
+                self.bot.web_viewer_integration and 
+                hasattr(self.bot.web_viewer_integration, 'bot_integration')):
+                try:
+                    self.bot.web_viewer_integration.bot_integration.capture_command(
+                        message, 
+                        self.name or 'keyword', 
+                        response, 
+                        success=True
+                    )
+                except Exception as e:
+                    self.logger.error(f"Failed to capture keyword command for web viewer: {e}")
+        
             return await self.send_response(message, response)
         else:
             # No response format configured - don't respond

@@ -187,6 +187,15 @@ class RepeaterManager:
                     cursor.execute("ALTER TABLE complete_contact_tracking ADD COLUMN is_starred BOOLEAN DEFAULT 0")
                     conn.commit()
                 
+                cursor.execute("PRAGMA table_info(purging_log)")
+                columns = [row[1] for row in cursor.fetchall()]
+                
+                if 'details' not in columns:
+                    self.logger.info("Adding missing column 'details' to purging_log table")
+                    cursor.execute("ALTER TABLE purging_log ADD COLUMN details TEXT")
+                    conn.commit()
+                    self.logger.info("Column 'details' added successfully")
+                
                 self.logger.info("Database schema migration completed")
                 
         except Exception as e:
