@@ -281,17 +281,18 @@ class CommandManager:
                         self.logger.info(f"✅ DM sent to {contact_name}")
                     self.bot.rate_limiter.record_send()
                     self.bot.bot_tx_rate_limiter.record_tx()
-                    await self._forward_bot_response_to_telegram(content)
+                    await self._forward_bot_response_to_telegram(content, is_dm=True)
                     return True
                 else:
                     # If result is not None but doesn't have expected attributes, assume success
                     self.logger.info(f"✅ DM sent to {contact_name} (result: {result})")
                     self.bot.rate_limiter.record_send()
                     self.bot.bot_tx_rate_limiter.record_tx()
-                    await self._forward_bot_response_to_telegram(content)
+                    await self._forward_bot_response_to_telegram(content, is_dm=True)
                     return True
             else:
                 # This means send_msg_with_retry failed to get an ACK after all retries
+                await self._forward_bot_response_to_telegram(content, is_dm=True, success=False)
                 if hasattr(self.bot.meshcore, 'commands') and hasattr(self.bot.meshcore.commands, 'send_msg_with_retry'):
                     self.logger.error(f"❌ DM to {contact_name} failed - no ACK received after retries")
                 else:
@@ -368,6 +369,7 @@ class CommandManager:
                         return False
             else:
                 # No result returned - this means send_chan_msg failed
+                await self._forward_bot_response_to_telegram(content, is_dm=False, success=False)
                 self.logger.error(f"Failed to send channel message to {channel} (channel {channel_num}): No result returned from send_chan_msg")
                 return False
                 
@@ -494,13 +496,11 @@ class CommandManager:
         
         return commands_list
     
-    async def _forward_bot_response_to_telegram(self, content: str):
-        """Пересылает ответ бота в Telegram — всегда, независимо от исходного сообщения"""
+    async def _forward_bot_response_to_telegram(self, content: str, is_dm: bool = False, success: bool = True):
+        """Пересылает ответ бота в Telegram — всегда, даже при ошибке отправки в MeshCore"""
         if 'telegram_bridge' not in self.commands:
             return
-
         bridge = self.commands['telegram_bridge']
-
         if not (bridge.enabled and
                 bridge.telegram_chat_id and
                 self.bot.config.getboolean('Telegram_Bridge', 'forward_bot_responses', fallback=True)):
@@ -508,16 +508,22 @@ class CommandManager:
 
         try:
             bot_name = "#" + self.bot.config.get('Bot', 'bot_name', fallback='MeshCoreBot')
-            full_text = f"🤖 {bot_name}: {content}"
-
+            status_emoji = "✅" if success else "❌"
+            status_text = " (доставлено)" if success else " (НЕ ДОСТАВЛЕНО!)"
+            
+            if is_dm:
+                full_text = f"🤖 #DM {bot_name}: {content}{status_text} {status_emoji}"
+            else:
+                full_text = f"🤖 {bot_name}: {content}{status_text} {status_emoji}"
+               
             asyncio.create_task(
                 bridge._send_to_telegram_non_blocking(
                     chat_id=bridge.telegram_chat_id,
                     text=full_text,
-                    original_message=None  # Пока не нужен, т.к. не используем reply_to
+                    original_message=None
                 )
             )
-            self.logger.info("Ответ бота поставлен в очередь на отправку в Telegram")
+            self.logger.info(f"Ответ бота {'успешно ' if success else ''}поставлен в очередь на отправку в Telegram")
         except Exception as e:
             self.logger.error(f"Ошибка пересылки ответа бота в Telegram: {e}", exc_info=True)
             
