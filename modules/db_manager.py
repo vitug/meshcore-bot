@@ -27,6 +27,7 @@ class DBManager:
         'complete_contact_tracking',  # Repeater manager
         'daily_stats',  # Repeater manager
         'purging_log',  # Repeater manager
+        'reply_mapping',  # Telegram bridge
     }
     
     def __init__(self, bot, db_path: str = "meshcore_bot.db"):

@@ -585,7 +585,6 @@ use_zulu_time = false
             self.logger.warning("Using default: meshcore_bot.log")
             log_file = 'meshcore_bot.log'
         
-        file_handler = logging.FileHandler(log_file)
         file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
         

@@ -274,7 +274,7 @@ class MessageHandler:
             
             hops = path_len if path_len != 255 else 0
             if hops > 0:
-                path_string = f"{path_string} ({hops} hops)
+                path_string = f"{path_string} ({hops} hops)"
 
             # Sanitize message content to prevent injection attacks
             # Note: Firmware enforces 150-char limit at hardware level, so we disable length check
