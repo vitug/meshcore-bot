@@ -687,20 +687,7 @@ use_zulu_time = false
             if self.meshcore.is_connected:
                 self.connected = True
                 self.logger.info(f"Connected to: {self.meshcore.self_info}")
-                
-                # Автоматическая синхронизация времени (как в meshcore_cli.py)
-                try:
-                    import time
-                    res = await self.meshcore.commands.set_time(int(time.time()))
-                    if res.type == EventType.ERROR and res.error_code == 6:
-                        self.logger.info("No time sync needed (device time already current)")
-                    elif res.type == EventType.ERROR:
-                        self.logger.warning(f"Time sync failed: {res.error_message} (code: {res.error_code})")
-                    else:
-                        self.logger.info("Device time synchronized successfully")
-                except Exception as e:
-                    self.logger.warning(f"Error during time synchronization: {e} - proceeding without sync")
-                
+                              
                 # Wait for contacts to load
                 await self.wait_for_contacts()
                 

@@ -246,6 +246,10 @@ class TelegramBridgeCommand(BaseCommand):
             f"транслит={translit_mode}, задержка {self.rate_limit_seconds}с"
         )
         
+        # Persist reply mapping
+        self.persist_reply_mapping = self.bot.config.getboolean('Telegram_Bridge', 'persist_reply_mapping', fallback=True)
+        self.mapping_ttl_days = self.bot.config.getint('Telegram_Bridge', 'mapping_ttl_days', fallback=7)
+
         if not self.enabled:
             self.logger.info("Telegram Bridge отключён в конфиге")
             return
@@ -264,10 +268,6 @@ class TelegramBridgeCommand(BaseCommand):
         else:
             self.logger.info("Telegram Bridge включён (chat_id не указан — только авто-определение)")
     
-        # Persist reply mapping
-        self.persist_reply_mapping = self.bot.config.getboolean('Telegram_Bridge', 'persist_reply_mapping', fallback=True)
-        self.mapping_ttl_days = self.bot.config.getint('Telegram_Bridge', 'mapping_ttl_days', fallback=7)
-
         if self.persist_reply_mapping:
             try:
                 self.bot.db_manager.create_table('reply_mapping', '''

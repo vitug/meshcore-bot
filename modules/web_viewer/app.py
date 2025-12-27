@@ -116,7 +116,7 @@ class BotDataViewer:
         """Load configuration from file"""
         config = configparser.ConfigParser()
         if os.path.exists(config_path):
-            config.read(config_path)
+            config.read(config_path, encoding='utf-8')
         return config
     
     def _setup_template_context(self):
