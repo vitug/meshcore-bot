@@ -674,9 +674,15 @@ use_zulu_time = false
                 self.meshcore = await meshcore.MeshCore.create_tcp(hostname, tcp_port, debug=False)
             else:
                 # Create BLE connection (default)
+                pin = self.config.get('Connection', 'ble_pin', fallback=None)
+                if pin:
+                    pin = pin.strip() or None   # если пустая строка — None                
                 ble_device_name = self.config.get('Connection', 'ble_device_name', fallback=None)
-                self.logger.info(f"Connecting via BLE" + (f" to device: {ble_device_name}" if ble_device_name else ""))
-                self.meshcore = await meshcore.MeshCore.create_ble(ble_device_name, debug=False)
+                self.logger.info(f"Connecting via BLE with pin {pin}" + (f" to device: {ble_device_name}" if ble_device_name else ""))
+                if pin:
+                    self.meshcore = await meshcore.MeshCore.create_ble(ble_device_name, debug=False, pin=pin)
+                else:
+                    self.meshcore = await meshcore.MeshCore.create_ble(ble_device_name, debug=False)
             
             if self.meshcore.is_connected:
                 self.connected = True
