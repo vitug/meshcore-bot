@@ -1,27 +1,26 @@
+# Дополнения к описанию
+
 Ошибка инициализации Telegram бота: module 'urllib3.fields' has no attribute 'format_header_param'
 pip install "urllib3==1.26.18" --force-reinstall
 
-# 2. Отдаём файл в полное владение пользователю meshcore
-sudo chown meshcore:meshcore /opt/meshcore-bot/meshcore_bot.db
-
-# 3. Даём нормальные права на чтение-запись
-sudo chmod 664 /opt/meshcore-bot/meshcore_bot.db
-
-# 4. На всякий случай проверяем и исправляем права на папку (очень важно!)
-sudo chown meshcore:meshcore /opt/meshcore-bot
-sudo chmod 775 /opt/meshcore-bot
-
-# 1. Добавляем вашего пользователя в группу meshcore
+# 1. Добавляем пользователя user в группу meshcore
 sudo usermod -a -G meshcore user
 
-# 2. Даём группе права на запись в папку с ботом и всё внутри
-sudo chgrp -R meshcore /opt/meshcore-bot
-sudo chmod -R 775 /opt/meshcore-bot
+# 2. Назначаем владельца и группу
+sudo chown -R meshcore:meshcore /opt/meshcore-bot
 
-# 3. (Опционально, но очень рекомендуется) делаем так, чтобы новые файлы тоже наследовали группу meshcore
+# 3. Устанавливаем права:
+#    - каталоги: 775
+#    - файлы: 664
+sudo find /opt/meshcore-bot -type d -exec chmod 775 {} \;
+sudo find /opt/meshcore-bot -type f -exec chmod 664 {} \;
+
+# 4. Делаем так, чтобы новые файлы наследовали группу meshcore
 sudo chmod g+s /opt/meshcore-bot
-# если хотите, чтобы и подкаталоги тоже наследовали группу:
 sudo find /opt/meshcore-bot -type d -exec chmod g+s {} \;
+
+# 5. (Если нужно) Делаем исполняемыми только нужные скрипты
+sudo chmod +x /opt/meshcore-bot/meshcore_bot.py
 
 cd ~/Meshcore/meshcore-bot
 
@@ -34,9 +33,6 @@ source venv/bin/activate
 # Теперь pip работает без ограничений
 pip install --upgrade pip
 pip install -r requirements.txt
-
-source venv/bin/activate    # каждый раз при новом терминале
-python main.py              # или python bot.py — смотри, какой файл там основной
 
 # Посмотри, какие USB-устройства вообще видны
 ls -la /dev/tty*
