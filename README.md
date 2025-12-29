@@ -1,3 +1,6 @@
+Ошибка инициализации Telegram бота: module 'urllib3.fields' has no attribute 'format_header_param'
+pip install "urllib3==1.26.18" --force-reinstall
+
 # 2. Отдаём файл в полное владение пользователю meshcore
 sudo chown meshcore:meshcore /opt/meshcore-bot/meshcore_bot.db
 
