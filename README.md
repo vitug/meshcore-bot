@@ -21,7 +21,7 @@ sudo chmod -R 775 /opt/meshcore-bot
 # 3. (Опционально, но очень рекомендуется) делаем так, чтобы новые файлы тоже наследовали группу meshcore
 sudo chmod g+s /opt/meshcore-bot
 # если хотите, чтобы и подкаталоги тоже наследовали группу:
-find /opt/meshcore-bot -type d -exec chmod g+s {} \;
+sudo find /opt/meshcore-bot -type d -exec chmod g+s {} \;
 
 cd ~/Meshcore/meshcore-bot
 
