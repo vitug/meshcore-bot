@@ -114,7 +114,9 @@ class RepeaterCommand(BaseCommand):
             await self.send_response(message, response[1])
             
             # Wait for bot TX rate limiter to allow next message
-            import asyncio
+            # import asyncio
+            # error: cannot access local variable 'asyncio' where it is not associated with a value
+            
             rate_limit = self.bot.config.getfloat('Bot', 'bot_tx_rate_limit_seconds', fallback=1.0)
             # Use a conservative sleep time to avoid rate limiting
             sleep_time = max(rate_limit + 1.0, 2.0)  # At least 2 seconds, or rate_limit + 1 second

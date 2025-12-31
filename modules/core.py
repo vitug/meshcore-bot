@@ -687,7 +687,10 @@ use_zulu_time = false
             if self.meshcore.is_connected:
                 self.connected = True
                 self.logger.info(f"Connected to: {self.meshcore.self_info}")
-                              
+                         
+                self.meshcore.auto_update_contacts = True
+                self.logger.info("Enabled auto_update_contacts on device")
+                
                 # Wait for contacts to load
                 await self.wait_for_contacts()
                 

@@ -2563,7 +2563,8 @@ class RepeaterManager:
                 if not device_removal_successful:
                     try:
                         self.logger.info(f"Method 3: Attempting removal via CLI...")
-                        import asyncio
+                        #import asyncio
+                        # error: cannot access local variable 'asyncio' where it is not associated with a value
                         import sys
                         import io
                         
