@@ -13,8 +13,19 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from meshcore import EventType
 from .utils import rate_limited_nominatim_reverse_sync
+from meshcore_cli.meshcore_cli import next_cmd
+from contextlib import contextmanager
+import io
+import sys
 
-
+@contextmanager
+def suppress_stdout():
+    original = sys.stdout
+    sys.stdout = io.StringIO()
+    try:
+        yield
+    finally:
+        sys.stdout = original
 
 class RepeaterManager:
     """Manages repeater contacts database and purging operations"""
@@ -2079,6 +2090,15 @@ class RepeaterManager:
                     (public_key,)
                 )
                 
+                # Принудительно обновляем список контактов с устройства
+                try:
+                    with suppress_stdout():
+                        await next_cmd(self.bot.meshcore, ["contacts"])
+                    self.logger.debug("Принудительно перезагрузили contacts через CLI")
+                    await asyncio.sleep(0.5)  # дать время на обработку
+                except Exception as e:
+                    self.logger.warning(f"Не удалось перезагрузить contacts после удаления: {e}")
+        
                 # Log the purge action
                 self.db_manager.execute_update('''
                     INSERT INTO purging_log (action, public_key, name, reason)
