@@ -12,10 +12,12 @@ log = logging.getLogger(__name__)
 
 # Хранилище истории по user_id
 USER_HISTORY = {}
+
 # Задачи, которые сейчас выполняются (по user_id → asyncio.Task)
 RUNNING_TASKS: dict[str, asyncio.Task] = {}
+
 # Опционально: можно ещё и Lock на пользователя, но Task достаточно
-MAX_HISTORY = 5  # сколько пар user-assistant хранить + 1 системный промпт
+MAX_HISTORY = 7  # сколько пар user-assistant хранить + 1 системный промпт
 
 
 class AICommand(BaseCommand):
@@ -24,13 +26,37 @@ class AICommand(BaseCommand):
     description = "Задай вопрос ИИ: ai/ии <вопрос> | ai очистить — сбросить память"
     category = "fun"
 
-    SYSTEM_PROMPT = (
+    DEFAULT_SYSTEM_PROMPT = (
         "Ты самый весёлый чат-бот всей сети Мешкор. "
-        "На вопрос Прачечная? отвечай примерно так: Пинговачечная! Это Мешкор, тут везде моксон-диполь-яги. "
-        "Пиши без точек, смайликов и приветствий в конце. "
-        "Отвечай максимально кратко (1–2 предложения), но всегда с юмором. "
-        "Ты работаешь среди радиоволн, антенн Яги, Моксон, диполей, Гало, децибелов, пингов и понгов."
+        "Пиши без лишних точек, смайликов и приветствий. "
+        "Отвечай максимально кратко (1–2 предложения), но всегда с юмором для технарей. "
+        "Ты работаешь среди радиоволн, антенн Яги, Моксон, диполей, Гало, децибелов, адвертов, пингов и понгов."
     )
+
+    def __init__(self, bot):
+        super().__init__(bot)
+        self.system_prompt = self._load_system_prompt()
+
+    def _load_system_prompt(self):
+        prompt_file = self.bot.config.get('AI_Command', 'system_prompt_file', fallback=None)
+        
+        if prompt_file and prompt_file.strip():
+            prompt_file = prompt_file.strip()
+            try:
+                with open(prompt_file, 'r', encoding='utf-8') as f:
+                    prompt = f.read().strip()
+                if prompt:
+                    self.logger.info(f"Загружен системный промпт из файла {prompt_file}")
+                    return prompt
+                else:
+                    self.logger.warning(f"Файл системного промпта пустой: {prompt_file}")
+            except FileNotFoundError:
+                self.logger.warning(f"Файл системного промпта не найден: {prompt_file}")
+            except Exception as e:
+                self.logger.warning(f"Ошибка чтения файла системного промпта {prompt_file}: {e}")
+        
+        self.logger.info("Используется стандартный системный промпт")
+        return self.DEFAULT_SYSTEM_PROMPT
 
     def get_help_text(self) -> str:
         return "ai <вопрос> — спросить ИИ\nии <вопрос> — тоже\nai очистить — сбросить память"
@@ -48,14 +74,11 @@ class AICommand(BaseCommand):
         try:
             # Инициализация истории
             if user_id not in USER_HISTORY:
-                USER_HISTORY[user_id] = [{'role': 'system', 'content': self.SYSTEM_PROMPT}]
-
+                USER_HISTORY[user_id] = [{'role': 'system', 'content': self.system_prompt}]
             USER_HISTORY[user_id].append({'role': 'user', 'content': query})
-
             # Обрезаем историю
             if len(USER_HISTORY[user_id]) > MAX_HISTORY + 1:
                 USER_HISTORY[user_id] = [USER_HISTORY[user_id][0]] + USER_HISTORY[user_id][-(MAX_HISTORY):]
-
             client = AsyncClient()
             response = await client.chat(
                 model='gemma2:2b',
@@ -68,13 +91,10 @@ class AICommand(BaseCommand):
                     'repeat_penalty': 1.1,
                 }
             )
-
             answer = response['message']['content'].strip()
             USER_HISTORY[user_id].append({'role': 'assistant', 'content': answer})
-
             final_answer = f"{display_name}: {answer}"
             await self.send_response(message, final_answer)
-
         except asyncio.CancelledError:
             log.info(f"AI generation cancelled for user {user_id}")
         except Exception as e:
