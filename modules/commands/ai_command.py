@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
 AI command — полностью асинхронный вариант с защитой от повторного запуска
++ Отправка ответов ИИ теперь использует логику TelegramBridgeCommand
+  (разбивка на части, транслитерация, паузы, нумерация частей)
++ Все настройки разбивки/транслитерации берутся из [Telegram_Bridge]
++ Если TelegramBridge плагин не загружен или отключён — fallback к простой отправке
 """
 from ollama import AsyncClient
 from .base_command import BaseCommand
@@ -79,6 +83,7 @@ class AICommand(BaseCommand):
             # Обрезаем историю
             if len(USER_HISTORY[user_id]) > MAX_HISTORY + 1:
                 USER_HISTORY[user_id] = [USER_HISTORY[user_id][0]] + USER_HISTORY[user_id][-(MAX_HISTORY):]
+
             client = AsyncClient()
             response = await client.chat(
                 model='gemma2:2b',
@@ -93,15 +98,41 @@ class AICommand(BaseCommand):
             )
             answer = response['message']['content'].strip()
             USER_HISTORY[user_id].append({'role': 'assistant', 'content': answer})
-            final_answer = f"{display_name}: {answer}"
-            await self.send_response(message, final_answer)
+
+            # === ОТПРАВКА ОТВЕТА ===
+            # Пытаемся использовать TelegramBridge для разбивки/транслитерации
+            telegram_bridge = self.bot.command_manager.get_plugin_by_name('telegram_bridge')
+            
+            if telegram_bridge and hasattr(telegram_bridge, '_prepare_and_send_to_mesh'):
+                # Определяем цель и тип (DM или канал)
+                target = message.sender_id if message.is_dm else message.channel
+                is_dm = message.is_dm
+                prefix = f"{display_name}: "
+
+                self.logger.debug("Используем TelegramBridge для отправки AI-ответа (разбивка + транслит)")
+                sent_count, total_parts, was_translit = await telegram_bridge._prepare_and_send_to_mesh(
+                    message_text=answer,
+                    target=target,
+                    is_dm=is_dm,
+                    prefix=prefix,
+                    force_translit=False  # используем настройки из [Telegram_Bridge]
+                )
+                
+                self.logger.info(
+                    f"AI ответ отправлен через TelegramBridge: {sent_count}/{total_parts} частей"
+                    f"{' (транслит)' if was_translit else ''}"
+                )
+            else:
+                # Fallback — простая отправка без разбивки и транслита
+                self.logger.debug("TelegramBridge не доступен — fallback к простой отправке")
+                await self.send_response(message, f"{display_name}: {answer}")
+
         except asyncio.CancelledError:
             log.info(f"AI generation cancelled for user {user_id}")
         except Exception as e:
             log.error(f"AI command error (user {user_id}): {e}", exc_info=True)
             await self.send_response(message, f"{display_name}: ИИ ушёл курить антенну🚬")
         finally:
-            # В любом случае — убираем задачу из словаря
             RUNNING_TASKS.pop(user_id, None)
 
     async def execute(self, message: MeshMessage) -> bool:
@@ -118,7 +149,6 @@ class AICommand(BaseCommand):
         if content_lower in ["ai очистить", "ии очистить"]:
             if user_id in USER_HISTORY:
                 del USER_HISTORY[user_id]
-            # Если сейчас идёт генерация — отменим её
             if user_id in RUNNING_TASKS:
                 RUNNING_TASKS[user_id].cancel()
                 RUNNING_TASKS.pop(user_id, None)
@@ -127,23 +157,20 @@ class AICommand(BaseCommand):
         # === Парсинг вопроса ===
         query = None
         if content_lower.startswith(("ai ", "ии ")):
-            query = raw_content[raw_content.lower().index(" ", 0) + 1:].strip()
+            query = raw_content[raw_content.lower().find(" ", 0) + 1:].strip()
         elif content_lower in ["ai", "ии"]:
             query = "Привет"
 
         if not query:
             return False
 
-        # === Ключевая защита от повторного запуска ===
+        # === Защита от повторного запуска ===
         if user_id in RUNNING_TASKS:
-            # Можно либо молча проигнорировать, либо сказать, что уже думает
             await self.send_response(message, f"{display_name}: Подожди, я ещё думаю над предыдущим вопросом ⏳")
             return True
 
-        # Создаём задачу и сохраняем её
+        # Создаём задачу
         task = asyncio.create_task(self._generate_response(message, user_id, query, display_name))
         RUNNING_TASKS[user_id] = task
 
-        # Опционально: можно добавить fire-and-forget, чтобы не ждать здесь
-        # (но мы всё равно возвращаем True, чтобы команда считалась обработанной)
         return True
