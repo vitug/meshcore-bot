@@ -675,3 +675,51 @@ debug = false
 # true: Start web viewer automatically when bot starts
 # false: Start web viewer manually (recommended)
 auto_start = false
+
+[Telegram_Bridge]
+# Включить мост с Telegram
+enabled = true
+
+# Токен бота (@BotFather)
+telegram_token = 123
+
+# ID чата (можно узнать через @userinfobot или getUpdates)
+telegram_chat_id = 0
+
+# Какие каналы пересылать: all или через запятую (например: general,tech,offtopic)
+forward_channels = all
+
+# Пересылать ли личные сообщения (DM)
+include_dm = true
+
+# Добавлять ли имя отправителя жирным в начале сообщения
+prefix_sender = true
+
+# Пересылать ли ответы бота в Telegram (по умолчанию да)
+forward_bot_responses = true
+
+# Канал, куда будут идти сообщения без префикса
+default_channel = public
+
+# true, если хотите хранить текст (полезно для debug)
+save_reply_content = false
+
+# Persist reply mapping в db (адаптация для MeshCore: persistent, чтобы пережить рестарт)
+persist_reply_mapping = true
+mapping_ttl_days = 7
+
+# Максимум байт на сообщение
+max_mesh_bytes = 140
+# Максимум частей (не более 3, чтобы не нагружать сеть)      
+max_mesh_parts = 5        
+# Умная разбивка по словам (false = строго по байтам)
+smart_split = true        
+
+# Режимы транслитерации:
+# auto_translit = true   — транслитерировать если сообщение не помещается в лимит
+# force_translit = true  — ВСЕГДА транслитерировать ВСЕ сообщения (кириллицу → латиницу)
+auto_translit = true
+force_translit = false
+
+[AI_Command] 
+system_prompt_file = ai_system_prompt.txt
