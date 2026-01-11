@@ -73,7 +73,7 @@ class TestCommand(BaseCommand):
             content = content[1:].strip()
 
         lower = content.lower()
-
+        # Проверка на ключевые слова
         for kw in self.keywords:
             kw_low = kw.lower()
             # Просто ключевое слово
@@ -82,17 +82,20 @@ class TestCommand(BaseCommand):
             # Ключевое слово + пробел + любой текст
             if lower.startswith(kw_low + ' ') and len(content) > len(kw_low) + 1:
                 return True
-
+        # Проверка на одиночную цифру от 0 до 9
+        if content.isdigit() and len(content) == 1 and content in '0123456789':
+            return True
         return False
-
     def extract_phrase(self, message: MeshMessage) -> str:
         """Возвращает текст после ключевого слова (если есть)"""
         content = self.clean_content(message.content)
         if content.startswith('!'):
             content = content[1:].strip()
-
         lower = content.lower()
-
+        # Проверка на одиночную цифру
+        if content.isdigit() and len(content) == 1 and content in '0123456789':
+            return content
+        # Стандартная логика для ключевых слов
         for kw in self.keywords:
             kw_low = kw.lower()
             if lower.startswith(kw_low + ' '):
