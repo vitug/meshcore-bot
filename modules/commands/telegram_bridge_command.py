@@ -783,7 +783,26 @@ class TelegramBridgeCommand(BaseCommand):
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 self.tg_loop = loop
-                loop.run_until_complete(self.tg_bot.polling(none_stop=True, interval=1, timeout=60))
+                
+                retry_delay = 5
+                max_delay = 600  # 10 минут максимум
+                
+                while True:
+                    try:
+                        self.logger.info("Telegram polling: подключение...")
+                        loop.run_until_complete(
+                            self.tg_bot.polling(none_stop=True, interval=1, timeout=60)
+                        )
+                    except KeyboardInterrupt:
+                        self.logger.info("Telegram polling остановлен (KeyboardInterrupt)")
+                        break
+                    except Exception as e:
+                        self.logger.error(f"Telegram polling ошибка: {e}. Повтор через {retry_delay} сек...")
+                        import time
+                        time.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2, max_delay)  # Экспоненциальный backoff
+                    else:
+                        retry_delay = 5  # Сброс при успешном подключении
             threading.Thread(target=run_polling, daemon=True).start()
             self.logger.info("Telegram поллинг запущен")
             

@@ -15,7 +15,7 @@ class RepeaterCommand(BaseCommand):
     
     # Plugin metadata
     name = "repeater"
-    keywords = ["repeater", "repeaters", "rp"]
+    keywords = ["repeater", "repeaters"]
     description = "Manage repeater contacts and purging operations (DM only)"
     requires_dm = True
     cooldown_seconds = 0
