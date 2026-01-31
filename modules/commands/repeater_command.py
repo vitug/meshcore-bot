@@ -99,6 +99,11 @@ class RepeaterCommand(BaseCommand):
                     response = await self._handle_geocode(args)
                 elif subcommand == "help":
                     response = self.get_help()
+                elif subcommand == "clean":
+                    if len(args) > 0 and args[0].lower() == "always":
+                        response = await self._handle_clean_always()
+                    else:
+                        response = "!repeater clean always — принудительная очистка"                    
                 else:
                     response = f"Unknown subcommand: {subcommand}\n{self.get_help()}"
                     
@@ -129,7 +134,22 @@ class RepeaterCommand(BaseCommand):
             await self.send_response(message, response)
         
         return True
-    
+ 
+    async def _handle_clean_always(self) -> str:
+        try:
+            removed_repeaters = await self.bot.repeater_manager.purge_old_repeaters(
+                days_old=14, 
+                reason="Принудительная очистка по команде clean always"
+            )
+            removed_stale = await self.bot.repeater_manager._remove_stale_contacts(
+                await self.bot.repeater_manager._get_stale_contacts(days_without_advert=14),
+                max_remove=50
+            )
+            total = removed_repeaters + removed_stale
+            return f"✅ Принудительная очистка: удалено {total} контактов ({removed_repeaters} репитеров, {removed_stale} stale)"
+        except Exception as e:
+            return f"❌ Ошибка принудительной очистки: {e}"
+        
     async def _handle_scan(self) -> str:
         """Scan contacts for repeaters"""
         self.logger.info("Repeater scan command received")
