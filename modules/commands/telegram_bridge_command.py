@@ -13,12 +13,18 @@ Telegram Bridge Command для MeshCore Bot
 + ТРАНСЛИТЕРАЦИЯ кириллицы:
   - Автоматическая (auto_translit=true) — если сообщение не помещается в лимит
   - Принудительная (/tl команда) — всегда транслитерирует
++ RETRY ЛОГИКА И ОЧЕРЕДЬ СООБЩЕНИЙ:
+  - Автоматическое переподключение polling при обрыве связи
+  - Retry при отправке сообщений с экспоненциальным backoff
+  - Очередь отложенной отправки при временных сбоях сети
 """
 
 import asyncio
 import threading
+import time
 import re
 from typing import Dict, Optional, List, Tuple
+from collections import deque
 from .base_command import BaseCommand
 from ..models import MeshMessage
 from threading import Lock
@@ -205,6 +211,55 @@ def _force_split_by_bytes(text: str, max_bytes: int) -> str:
     
     return result
 
+
+# ============================================================================
+# ОЧЕРЕДЬ ДЛЯ ОТЛОЖЕННОЙ ОТПРАВКИ ПРИ СБОЯХ СЕТИ
+# ============================================================================
+class TelegramMessageQueue:
+    """Потокобезопасная очередь сообщений с retry логикой"""
+    
+    def __init__(self, max_size: int = 100, max_age_seconds: int = 3600):
+        self.queue: deque = deque(maxlen=max_size)
+        self.lock = Lock()
+        self.max_age = max_age_seconds
+    
+    def add(self, chat_id: str, text: str, original_message: MeshMessage):
+        """Добавляет сообщение в очередь"""
+        with self.lock:
+            self.queue.append({
+                'chat_id': chat_id,
+                'text': text,
+                'original_message': original_message,
+                'timestamp': time.time(),
+                'attempts': 0
+            })
+    
+    def get_pending(self) -> List[dict]:
+        """Возвращает сообщения для повторной отправки"""
+        with self.lock:
+            now = time.time()
+            # Удаляем устаревшие
+            while self.queue and (now - self.queue[0]['timestamp']) > self.max_age:
+                self.queue.popleft()
+            return list(self.queue)
+    
+    def remove(self, item: dict):
+        """Удаляет сообщение из очереди"""
+        with self.lock:
+            try:
+                self.queue.remove(item)
+            except ValueError:
+                pass
+    
+    def increment_attempts(self, item: dict):
+        """Увеличивает счётчик попыток"""
+        with self.lock:
+            item['attempts'] += 1
+    
+    def __len__(self):
+        with self.lock:
+            return len(self.queue)
+
     
 class TelegramBridgeCommand(BaseCommand):
     name = "telegram_bridge"
@@ -231,11 +286,25 @@ class TelegramBridgeCommand(BaseCommand):
         # ====================================================================
         # НАСТРОЙКИ ТРАНСЛИТЕРАЦИИ
         # ====================================================================
-        # auto_translit = true  — транслитерировать автоматически если не помещается
-        # auto_translit = false — транслитерировать только по команде /tl
-        # force_translit = true — ВСЕГДА транслитерировать все сообщения
         self.auto_translit = bot.config.getboolean('Telegram_Bridge', 'auto_translit', fallback=True)
         self.force_translit = bot.config.getboolean('Telegram_Bridge', 'force_translit', fallback=False)
+        
+        # ====================================================================
+        # НАСТРОЙКИ RETRY И ОЧЕРЕДИ
+        # ====================================================================
+        self.send_max_retries = bot.config.getint('Telegram_Bridge', 'send_max_retries', fallback=5)
+        self.send_retry_delay = bot.config.getfloat('Telegram_Bridge', 'send_retry_delay', fallback=5.0)
+        self.polling_retry_delay = bot.config.getfloat('Telegram_Bridge', 'polling_retry_delay', fallback=10.0)
+        self.queue_max_size = bot.config.getint('Telegram_Bridge', 'queue_max_size', fallback=200)
+        self.queue_max_age = bot.config.getint('Telegram_Bridge', 'queue_max_age', fallback=3600)
+        self.queue_check_interval = bot.config.getint('Telegram_Bridge', 'queue_check_interval', fallback=30)
+        
+        # Очередь для отложенной отправки
+        self.message_queue = TelegramMessageQueue(
+            max_size=self.queue_max_size, 
+            max_age_seconds=self.queue_max_age
+        )
+        self._queue_processor_running = False
         
         # Rate limit
         self.rate_limit_seconds = bot.config.getfloat('Bot', 'rate_limit_seconds', fallback=2.0)
@@ -244,6 +313,10 @@ class TelegramBridgeCommand(BaseCommand):
         self.logger.info(
             f"Настройки: {self.max_mesh_bytes} байт, макс. {self.max_mesh_parts} частей, "
             f"транслит={translit_mode}, задержка {self.rate_limit_seconds}с"
+        )
+        self.logger.info(
+            f"Retry: {self.send_max_retries} попыток, задержка {self.send_retry_delay}с, "
+            f"очередь до {self.queue_max_size} сообщений (TTL {self.queue_max_age}с)"
         )
         
         # Persist reply mapping
@@ -377,6 +450,63 @@ class TelegramBridgeCommand(BaseCommand):
             return split_message_by_bytes_smart(text, self.max_mesh_bytes, self.max_mesh_parts)
         else:
             return split_message_by_bytes(text, self.max_mesh_bytes, self.max_mesh_parts)
+
+    # ========================================================================
+    # ОПРЕДЕЛЕНИЕ ТИПА ОШИБКИ ДЛЯ RETRY ЛОГИКИ
+    # ========================================================================
+    def _is_retryable_error(self, error: Exception) -> bool:
+        """Определяет, стоит ли повторять попытку при данной ошибке"""
+        error_type = type(error).__name__
+        error_str = str(error).lower()
+        
+        # Временные ошибки — повторяем
+        retryable_types = [
+            'RequestTimeout',
+            'ClientConnectorError', 
+            'ClientConnectorDNSError',
+            'ServerDisconnectedError',
+            'TimeoutError',
+            'ConnectionError',
+            'ClientOSError',
+            'OSError',
+        ]
+        
+        retryable_messages = [
+            'timeout',
+            'connection',
+            'dns',
+            'temporary',
+            'unavailable',
+            'rate limit',
+            'too many requests',
+            'retry',
+            'network',
+        ]
+        
+        if error_type in retryable_types:
+            return True
+            
+        for msg in retryable_messages:
+            if msg in error_str:
+                return True
+        
+        # Постоянные ошибки — не повторяем
+        permanent_messages = [
+            'chat not found',
+            'bot was blocked',
+            'forbidden',
+            'unauthorized',
+            'invalid token',
+            'bad request',
+            'user not found',
+        ]
+        
+        for msg in permanent_messages:
+            if msg in error_str:
+                return False
+        
+        # По умолчанию — повторяем
+        return True
 
     # ========================================================================
     # УНИВЕРСАЛЬНЫЙ МЕТОД ПОДГОТОВКИ И ОТПРАВКИ СООБЩЕНИЙ
@@ -514,6 +644,131 @@ class TelegramBridgeCommand(BaseCommand):
         
         return result
 
+    # ========================================================================
+    # ОБРАБОТЧИК ОЧЕРЕДИ ОТЛОЖЕННЫХ СООБЩЕНИЙ
+    # ========================================================================
+    def _start_queue_processor(self):
+        """Запускает фоновый поток для обработки отложенных сообщений"""
+        if self._queue_processor_running:
+            return
+            
+        def process_queue():
+            self._queue_processor_running = True
+            self.logger.info("Обработчик очереди сообщений запущен")
+            
+            while True:
+                try:
+                    time.sleep(self.queue_check_interval)
+                    
+                    pending = self.message_queue.get_pending()
+                    if not pending:
+                        continue
+                    
+                    self.logger.info(f"Очередь: {len(pending)} сообщений ожидают отправки")
+                    
+                    for item in pending:
+                        if item['attempts'] >= self.send_max_retries:
+                            self.logger.warning(
+                                f"Сообщение отброшено после {item['attempts']} попыток"
+                            )
+                            self.message_queue.remove(item)
+                            continue
+                        
+                        # Пробуем отправить
+                        success = self._try_send_sync(
+                            item['chat_id'], 
+                            item['text'], 
+                            item['original_message']
+                        )
+                        
+                        if success:
+                            self.message_queue.remove(item)
+                            self.logger.info("Отложенное сообщение успешно отправлено")
+                        else:
+                            self.message_queue.increment_attempts(item)
+                            self.logger.debug(
+                                f"Попытка {item['attempts']}/{self.send_max_retries} не удалась"
+                            )
+                            
+                        time.sleep(1)  # Пауза между попытками
+                        
+                except Exception as e:
+                    self.logger.error(f"Ошибка обработчика очереди: {e}")
+        
+        threading.Thread(
+            target=process_queue, 
+            daemon=True, 
+            name="TelegramQueueProcessor"
+        ).start()
+
+    def _try_send_sync(self, chat_id: str, text: str, original_message: MeshMessage) -> bool:
+        """Синхронная попытка отправки (для обработчика очереди)"""
+        if not self.tg_bot or not self.tg_loop:
+            return False
+            
+        try:
+            coro = self.tg_bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=None,
+                disable_web_page_preview=True
+            )
+            
+            future = asyncio.run_coroutine_threadsafe(coro, self.tg_loop)
+            sent_msg = future.result(timeout=30)
+            
+            if sent_msg:
+                self._save_reply_mapping_sync(sent_msg, original_message)
+                return True
+                
+        except Exception as e:
+            self.logger.debug(f"Попытка отправки не удалась: {type(e).__name__}: {e}")
+            
+        return False
+
+    def _save_reply_mapping_sync(self, sent_msg, original_mesh_msg: MeshMessage):
+        """Синхронное сохранение маппинга"""
+
+        if original_mesh_msg is None:
+            self.logger.debug("original_mesh_msg is None, пропускаем сохранение mapping")
+            return
+        
+        if sent_msg is None:
+            self.logger.debug("sent_msg is None, пропускаем сохранение mapping")
+            return
+        
+        try:
+            key = (sent_msg.chat.id, sent_msg.message_id)
+            
+            with REPLY_MAPPING_LOCK_SYNC:
+                REPLY_MAPPING[key] = original_mesh_msg
+                if len(REPLY_MAPPING) > REPLY_MAPPING_MAX_MESSAGES:
+                    keys_to_remove = sorted(REPLY_MAPPING.keys(), key=lambda k: k[1])[:200]
+                    for k in keys_to_remove:
+                        REPLY_MAPPING.pop(k, None)
+            
+            if self.persist_reply_mapping:
+                try:
+                    save_content = self.bot.config.getboolean(
+                        'Telegram_Bridge', 'save_reply_content', fallback=False
+                    )
+                    self.bot.db_manager.execute_update('''
+                        INSERT OR REPLACE INTO reply_mapping
+                        (chat_id, msg_id, sender_id, channel, is_dm, content)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (
+                        key[0], key[1],
+                        original_mesh_msg.sender_id or '',
+                        original_mesh_msg.channel or '',
+                        int(original_mesh_msg.is_dm) if original_mesh_msg.is_dm is not None else 0,
+                        original_mesh_msg.content if save_content else None
+                    ))
+                except Exception as e:
+                    self.logger.error(f"Ошибка сохранения mapping: {e}")
+                    
+        except Exception as e:
+            self.logger.error(f"Ошибка в _save_reply_mapping_sync: {e}", exc_info=True)
+
     def _init_telegram_bot(self):
         """Инициализация AsyncTeleBot с запуском поллинга в отдельном потоке"""
         try:
@@ -536,6 +791,10 @@ class TelegramBridgeCommand(BaseCommand):
                 else:
                     translit_status = "📝 По команде /tl"
                 
+                # Статус очереди
+                queue_size = len(self.message_queue)
+                queue_status = f"📋 {queue_size} в очереди" if queue_size > 0 else "📋 Очередь пуста"
+                
                 status_text = (
                     f"📡 <b>Статус Telegram Bridge</b>\n\n"
                     f"Мост: {bridge_status}\n"
@@ -543,7 +802,10 @@ class TelegramBridgeCommand(BaseCommand):
                     f"Целевой чат: <code>{target_chat}</code>\n"
                     f"Текущий чат: <code>{tg_message.chat.id}</code>\n"
                     f"Макс. байт: {self.max_mesh_bytes}, макс. частей: {self.max_mesh_parts}\n"
-                    f"Транслитерация: {translit_status}\n\n"
+                    f"Транслитерация: {translit_status}\n"
+                    f"{queue_status}\n\n"
+                    f"<b>Retry настройки:</b>\n"
+                    f"Попыток: {self.send_max_retries}, задержка: {self.send_retry_delay}с\n\n"
                     f"<b>Команды:</b>\n"
                     f"/ch #канал текст — в канал\n"
                     f"/dm node_id текст — в личку\n"
@@ -778,33 +1040,55 @@ class TelegramBridgeCommand(BaseCommand):
                             f"({sent_count}/{total_parts} частей){detail}"
                         )
 
-            # Запуск поллинга в отдельном потоке
+            # ================================================================
+            # ЗАПУСК POLLING С АВТОМАТИЧЕСКИМ ПЕРЕПОДКЛЮЧЕНИЕМ
+            # ================================================================
             def run_polling():
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 self.tg_loop = loop
                 
-                retry_delay = 5
+                retry_delay = self.polling_retry_delay
                 max_delay = 600  # 10 минут максимум
+                consecutive_failures = 0
                 
                 while True:
                     try:
                         self.logger.info("Telegram polling: подключение...")
+                        consecutive_failures = 0
+                        retry_delay = self.polling_retry_delay  # Сброс при успехе
+                        
                         loop.run_until_complete(
                             self.tg_bot.polling(none_stop=True, interval=1, timeout=60)
                         )
+                        
                     except KeyboardInterrupt:
                         self.logger.info("Telegram polling остановлен (KeyboardInterrupt)")
                         break
+                        
                     except Exception as e:
-                        self.logger.error(f"Telegram polling ошибка: {e}. Повтор через {retry_delay} сек...")
-                        import time
+                        consecutive_failures += 1
+                        error_type = type(e).__name__
+                        
+                        self.logger.error(
+                            f"Telegram polling ошибка #{consecutive_failures} ({error_type}): {e}. "
+                            f"Повтор через {retry_delay:.0f} сек..."
+                        )
+                        
                         time.sleep(retry_delay)
-                        retry_delay = min(retry_delay * 2, max_delay)  # Экспоненциальный backoff
-                    else:
-                        retry_delay = 5  # Сброс при успешном подключении
-            threading.Thread(target=run_polling, daemon=True).start()
-            self.logger.info("Telegram поллинг запущен")
+                        retry_delay = min(retry_delay * 1.5, max_delay)  # Экспоненциальный backoff
+                        
+            polling_thread = threading.Thread(
+                target=run_polling, 
+                daemon=True, 
+                name="TelegramPolling"
+            )
+            polling_thread.start()
+            
+            # Запуск обработчика очереди
+            self._start_queue_processor()
+            
+            self.logger.info("Telegram поллинг и очередь запущены")
             
         except Exception as e:
             self.logger.error(f"Ошибка инициализации Telegram бота: {e}")
@@ -812,87 +1096,128 @@ class TelegramBridgeCommand(BaseCommand):
 
     async def _save_reply_mapping(self, sent_msg, original_mesh_msg: MeshMessage):
         """Сохранение маппинга telegram_message_id → MeshMessage"""
-        async with get_async_lock():
-            key = (sent_msg.chat.id, sent_msg.message_id)
-            REPLY_MAPPING[key] = original_mesh_msg
 
-            if len(REPLY_MAPPING) > REPLY_MAPPING_MAX_MESSAGES:
-                keys_to_remove = sorted(REPLY_MAPPING.keys(), key=lambda k: k[1])[:200]
-                for k in keys_to_remove:
-                    REPLY_MAPPING.pop(k, None)
-
-        if self.persist_reply_mapping:
-            try:
-                save_content = self.bot.config.getboolean('Telegram_Bridge', 'save_reply_content', fallback=False)
-                content_value = original_mesh_msg.content if save_content else None
-
-                self.bot.db_manager.execute_update('''
-                    INSERT OR REPLACE INTO reply_mapping
-                    (chat_id, msg_id, sender_id, channel, is_dm, content)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (
-                    key[0], key[1],
-                    original_mesh_msg.sender_id or '',
-                    original_mesh_msg.channel,
-                    int(original_mesh_msg.is_dm),
-                    content_value
-                ))
-            except Exception as db_e:
-                self.logger.error(f"Ошибка сохранения mapping в БД: {db_e}", exc_info=True)                  
-
-    async def _send_to_telegram_non_blocking(self, chat_id: str, text: str, original_message: MeshMessage):
-        """Отправка сообщения в Telegram без блокировки."""
-        if not self.tg_bot or not self.tg_loop:
-            self.logger.error("Telegram бот или loop не инициализированы")
+        if original_mesh_msg is None:
+            self.logger.debug("original_mesh_msg is None, пропускаем сохранение mapping")
             return
-            
-        coro = self.tg_bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode=None,
-            disable_web_page_preview=True
-        )
-
-        future = asyncio.run_coroutine_threadsafe(coro, self.tg_loop)
-        original_mesh_msg = original_message
         
-        def _handle_send_result():
+        if sent_msg is None:
+            self.logger.debug("sent_msg is None, пропускаем сохранение mapping")
+            return
+        
+        try:
+            async with get_async_lock():
+                key = (sent_msg.chat.id, sent_msg.message_id)
+                REPLY_MAPPING[key] = original_mesh_msg
+
+                if len(REPLY_MAPPING) > REPLY_MAPPING_MAX_MESSAGES:
+                    keys_to_remove = sorted(REPLY_MAPPING.keys(), key=lambda k: k[1])[:200]
+                    for k in keys_to_remove:
+                        REPLY_MAPPING.pop(k, None)
+
+            if self.persist_reply_mapping:
+                try:
+                    save_content = self.bot.config.getboolean('Telegram_Bridge', 'save_reply_content', fallback=False)
+                    content_value = original_mesh_msg.content if save_content else None
+
+                    self.bot.db_manager.execute_update('''
+                        INSERT OR REPLACE INTO reply_mapping
+                        (chat_id, msg_id, sender_id, channel, is_dm, content)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (
+                        key[0], key[1],
+                        original_mesh_msg.sender_id or '',
+                        original_mesh_msg.channel or '',
+                        int(original_mesh_msg.is_dm) if original_mesh_msg.is_dm is not None else 0,
+                        content_value
+                    ))
+                except Exception as db_e:
+                    self.logger.error(f"Ошибка сохранения mapping в БД: {db_e}", exc_info=True)
+                    
+        except Exception as e:
+            self.logger.error(f"Ошибка в _save_reply_mapping: {e}", exc_info=True)                 
+
+    # ========================================================================
+    # ОТПРАВКА В TELEGRAM С RETRY ЛОГИКОЙ
+    # ========================================================================
+    async def _send_to_telegram_non_blocking(
+        self, 
+        chat_id: str, 
+        text: str, 
+        original_message: MeshMessage
+    ):
+        """Отправка в Telegram с retry логикой и fallback в очередь"""
+        if not self.tg_bot or not self.tg_loop:
+            self.logger.error("Telegram бот не инициализирован")
+            return
+
+        async def send_with_retry():
+            last_error = None
+            
+            for attempt in range(self.send_max_retries):
+                try:
+                    sent_msg = await self.tg_bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode=None,
+                        disable_web_page_preview=True
+                    )
+                    
+                    if sent_msg:
+                        await self._save_reply_mapping(sent_msg, original_message)
+                        self.logger.info(
+                            f"Сообщение отправлено в Telegram (msg_id={sent_msg.message_id})"
+                        )
+                        return True
+                        
+                except Exception as e:
+                    last_error = e
+                    error_type = type(e).__name__
+                    
+                    # Определяем, стоит ли повторять
+                    is_retryable = self._is_retryable_error(e)
+                    
+                    if is_retryable and attempt < self.send_max_retries - 1:
+                        delay = self.send_retry_delay * (attempt + 1)
+                        self.logger.warning(
+                            f"Telegram send ошибка ({error_type}), "
+                            f"попытка {attempt + 1}/{self.send_max_retries}, "
+                            f"повтор через {delay:.1f}с..."
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        if not is_retryable:
+                            self.logger.error(
+                                f"Telegram send постоянная ошибка ({error_type}): {e}"
+                            )
+                            return False  # Не добавляем в очередь
+                        else:
+                            self.logger.error(
+                                f"Telegram send финальная ошибка ({error_type}): {e}"
+                            )
+                        break
+            
+            # Все попытки исчерпаны — добавляем в очередь
+            self.message_queue.add(chat_id, text, original_message)
+            self.logger.warning(
+                f"Сообщение добавлено в очередь отложенной отправки "
+                f"(всего в очереди: {len(self.message_queue)})"
+            )
+            return False
+
+        # Запускаем в event loop Telegram
+        future = asyncio.run_coroutine_threadsafe(send_with_retry(), self.tg_loop)
+        
+        # Не блокируем — результат обработается асинхронно
+        def handle_result():
             try:
-                sent_msg = future.result(timeout=30)
-                if sent_msg:
-                    key = (sent_msg.chat.id, sent_msg.message_id)
-                    if original_mesh_msg is not None:
-                        with REPLY_MAPPING_LOCK_SYNC:
-                            REPLY_MAPPING[key] = original_mesh_msg
-                            if len(REPLY_MAPPING) > REPLY_MAPPING_MAX_MESSAGES:
-                                keys_to_remove = sorted(REPLY_MAPPING.keys(), key=lambda k: k[1])[:200]
-                                for k in keys_to_remove:
-                                    REPLY_MAPPING.pop(k, None)
-
-                        if self.persist_reply_mapping:
-                            try:
-                                save_content = self.bot.config.getboolean('Telegram_Bridge', 'save_reply_content', fallback=False)
-                                content_value = original_mesh_msg.content if save_content else None
-
-                                self.bot.db_manager.execute_update('''
-                                    INSERT OR REPLACE INTO reply_mapping
-                                    (chat_id, msg_id, sender_id, channel, is_dm, content)
-                                    VALUES (?, ?, ?, ?, ?, ?)
-                                ''', (
-                                    key[0], key[1],
-                                    original_mesh_msg.sender_id or '',
-                                    original_mesh_msg.channel,
-                                    int(original_mesh_msg.is_dm),
-                                    content_value
-                                ))
-                            except Exception as db_e:
-                                self.logger.error(f"Ошибка сохранения в БД: {db_e}", exc_info=True)
-
-                    self.logger.info(f"Сообщение переслано в Telegram (msg_id={sent_msg.message_id})")
+                future.result(timeout=300)  # 5 минут максимум на все retry
             except Exception as e:
-                self.logger.error(f"Ошибка в _handle_send_result: {e}", exc_info=True)
-
-        threading.Thread(target=_handle_send_result, daemon=True).start()
+                self.logger.error(f"Критическая ошибка отправки: {e}")
+                # Добавляем в очередь как fallback
+                self.message_queue.add(chat_id, text, original_message)
+                
+        threading.Thread(target=handle_result, daemon=True, name="TelegramSendHandler").start()
 
     async def execute(self, message: MeshMessage) -> bool:
         """Пересылка сообщений из MeshCore → Telegram"""

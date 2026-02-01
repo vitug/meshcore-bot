@@ -2,7 +2,7 @@
   "keywords": {
     "help": ["help","помощь"],
     "ping": ["ping", "пинг"],
-    "test": ["test", "t", "тест", "т","yes"],
+    "test": ["test", "t", "тест", "т","yes","cq"],
     "wx": ["wx", "weather", "wxa", "wxalert"],
     "gwx": ["gwx", "globalweather", "gwxa", "погода", "пгд"],
     "aqi": ["aqi", "air", "airquality", "air_quality", "воздух"],

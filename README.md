@@ -1,7 +1,14 @@
 # Дополнения к описанию
 
+# Отключение интернета на Raspberry Pi Zero 2 W
+sudo raspi-config
+Localisation Options → L4 WLAN Country → выберите RU Russia → OK → Finish → перезагрузка
+sudo iwconfig wlan0 power off
+sudo nano /boot/firmware/config.txt
+max_usb_current=1
+
 Ошибка инициализации Telegram бота: module 'urllib3.fields' has no attribute 'format_header_param'
-pip install "urllib3==1.26.18" --force-reinstall
+python -m pip install "urllib3==1.26.18" --force-reinstall
 
 # 1. Добавляем пользователя user в группу meshcore
 sudo usermod -a -G meshcore user

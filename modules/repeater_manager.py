@@ -2300,6 +2300,15 @@ class RepeaterManager:
                     (public_key,)
                 )
                 
+                # Принудительный refresh
+                try:
+                    with suppress_stdout():
+                        await next_cmd(self.bot.meshcore, ["contacts"])
+                    self.logger.debug("Принудительно перезагрузили contacts после удаления companion")
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    self.logger.warning(f"Не удалось перезагрузить contacts после удаления companion: {e}")
+                
                 # Log the purge action
                 self.db_manager.execute_update('''
                     INSERT INTO purging_log (action, public_key, name, reason)
@@ -3189,11 +3198,19 @@ class RepeaterManager:
                         removed_count += 1
                         self.logger.info(f"✅ Successfully removed stale contact: {contact_name}")
                         
+                        public_key = contact.get('public_key', 'unknown-stale-' + str(contact.get('name', 'noname')))
+                        name = contact.get('name', 'Unknown')
+                        
                         # Log the removal
-                        self.db_manager.execute_update(
-                            'INSERT INTO purging_log (action, details) VALUES (?, ?)',
-                            ('stale_contact_removal', f'Removed stale contact: {contact_name} (last seen {contact["days_stale"]} days ago)')
-                        )
+                        self.db_manager.execute_update('''
+                            INSERT INTO purging_log (action, public_key, name, reason)
+                            VALUES (?, ?, ?, ?)
+                        ''', (
+                            'stale_contact_removal',
+                            public_key,
+                            name,
+                            f"Removed stale contact (last seen {contact.get('days_stale', '?')} days ago)"
+                        ))
                     else:
                         error_code = result.payload.get('error_code', 'unknown') if hasattr(result, 'payload') else 'unknown'
                         self.logger.warning(f"❌ Failed to remove stale contact: {contact_name} - Error: {result.type}, Code: {error_code}")
