@@ -238,6 +238,49 @@ class CommandManager:
             if stats_command:
                 stats_command.record_command(message, 'advert', response_sent)
     
+    async def _find_contact_by_name_with_db_fallback(self, name: str):
+        """
+        Надёжный поиск контакта:
+        1. Ищем в БД самую свежую запись с точным именем
+        2. По найденному ключу ищем точное совпадение в meshcore.contacts
+        3. Fallback на стандартный get_contact_by_name
+        """
+        if not hasattr(self.bot, 'db_manager'):
+            # Если БД недоступна — сразу fallback
+            return self.bot.meshcore.get_contact_by_name(name)
+
+        try:
+            # Запрос аналогичный команде key: самая свежая запись с точным именем
+            query = '''
+                SELECT public_key
+                FROM complete_contact_tracking
+                WHERE name = ?
+                ORDER BY COALESCE(last_advert_timestamp, last_heard) DESC
+                LIMIT 1
+            '''
+            rows = self.bot.db_manager.execute_query(query, (name,))
+            if rows:
+                actual_pubkey = rows[0]['public_key']
+                self.logger.debug(f"Найден актуальный ключ из БД для {name}: {actual_pubkey[:16]}...")
+
+                # Точный поиск по полному ключу в оперативных контактах
+                for contact_data in self.bot.meshcore.contacts.values():
+                    if contact_data.get('public_key') == actual_pubkey:
+                        self.logger.info(f"Контакт {name} найден по актуальному ключу из БД")
+                        return contact_data
+
+                self.logger.warning(f"Контакт с ключом {actual_pubkey[:16]}... из БД не найден в meshcore.contacts")
+        except Exception as e:
+            self.logger.error(f"Ошибка поиска в БД для {name}: {e}")
+
+        # Fallback на стандартный поиск по имени
+        contact = self.bot.meshcore.get_contact_by_name(name)
+        if contact:
+            self.logger.debug(f"Используем fallback get_contact_by_name для {name}")
+        else:
+            self.logger.error(f"Контакт {name} совсем не найден")
+        return contact 
+        
     async def send_dm(self, recipient_id: str, content: str) -> bool:
         """Send a direct message using meshcore-cli command"""
         if not self.bot.connected or not self.bot.meshcore:
@@ -260,7 +303,8 @@ class CommandManager:
         
         try:
             # Find the contact by name (since recipient_id is the contact name)
-            contact = self.bot.meshcore.get_contact_by_name(recipient_id)
+            contact = await self._find_contact_by_name_with_db_fallback(recipient_id)
+            # contact = self.bot.meshcore.get_contact_by_name(recipient_id)
             if not contact:
                 self.logger.error(f"Contact not found for name: {recipient_id}")
                 return False
