@@ -85,15 +85,16 @@ class AICommand(BaseCommand):
                 USER_HISTORY[user_id] = [USER_HISTORY[user_id][0]] + USER_HISTORY[user_id][-(MAX_HISTORY):]
 
             client = AsyncClient()
+            model_name = self.bot.config.get('AI_Command', 'model', fallback='gemma2:2b')
             response = await client.chat(
-                model='gemma2:2b',
+                model = model_name,
                 messages=USER_HISTORY[user_id],
                 options={
-                    'temperature': 0.8,
-                    'num_ctx': 1024,
-                    'num_predict': 120,
-                    'top_p': 0.9,
-                    'repeat_penalty': 1.1,
+                    'temperature':   self.bot.config.getfloat('AI_Command', 'temperature',   fallback=0.85),
+                    'num_ctx':       self.bot.config.getint(  'AI_Command', 'num_ctx',       fallback=1024),
+                    'num_predict':   self.bot.config.getint(  'AI_Command', 'num_predict',   fallback=120),
+                    'top_p':         self.bot.config.getfloat('AI_Command', 'top_p',         fallback=0.92),
+                    'repeat_penalty':self.bot.config.getfloat('AI_Command', 'repeat_penalty',fallback=1.12),
                 }
             )
             answer = response['message']['content'].strip()
@@ -131,7 +132,7 @@ class AICommand(BaseCommand):
             log.info(f"AI generation cancelled for user {user_id}")
         except Exception as e:
             log.error(f"AI command error (user {user_id}): {e}", exc_info=True)
-            await self.send_response(message, f"{display_name}: ИИ ушёл курить антенну🚬")
+            await self.send_response(message, f"{display_name}: ИИ вышел покурить🚬")
         finally:
             RUNNING_TASKS.pop(user_id, None)
 

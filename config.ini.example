@@ -721,5 +721,21 @@ smart_split = true
 auto_translit = true
 force_translit = false
 
+# Прокси для ВСЕХ запросов Telegram (в т.ч. polling и отправка сообщений)
+# Форматы:
+# socks5://user:pass@host:port
+# socks5://host:port           (без авторизации)
+# http://host:port
+# https://host:port
+proxy_url = socks5://192.168.88.10:1080
+
 [AI_Command] 
 system_prompt_file = ai_system_prompt.txt
+# Модели gemma2:2b, llama3.2:1b, tinyllama и т.д.
+model = tinyllama 
+temperature = 0.85
+# можно уменьшить до 1024–1536 если памяти мало
+num_ctx    = 1024          
+num_predict = 140
+top_p      = 0.92
+repeat_penalty = 1.12

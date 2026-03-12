@@ -1,14 +1,39 @@
 # Дополнения к описанию
 
+# Патч для библиотеки telebot для исправления ошибки
+Ошибка инициализации Telegram бота: module 'urllib3.fields' has no attribute 'format_header_param'
+```
+python3 << 'EOF'
+import os
+
+path = "/opt/meshcore-bot/venv/lib/python3.11/site-packages/telebot/apihelper.py"
+
+with open(path, 'r') as f:
+    content = f.read()
+
+old = "format_header_param = fields.format_header_param"
+new = 'format_header_param = getattr(fields, "format_header_param", getattr(fields, "format_header_param_rfc2231", None))'
+
+if old in content:
+    content = content.replace(old, new)
+    with open(path, 'w') as f:
+        f.write(content)
+    print(f"PATCHED OK: {path}")
+else:
+    print("Строка не найдена — возможно уже пропатчено")
+    # Показать что там сейчас
+    for i, line in enumerate(open(path), 1):
+        if 'format_header_param' in line:
+            print(f"  Строка {i}: {line.rstrip()}")
+EOF
+```
+
 # Отключение интернета на Raspberry Pi Zero 2 W
 sudo raspi-config
 Localisation Options → L4 WLAN Country → выберите RU Russia → OK → Finish → перезагрузка
 sudo iwconfig wlan0 power off
 sudo nano /boot/firmware/config.txt
 max_usb_current=1
-
-Ошибка инициализации Telegram бота: module 'urllib3.fields' has no attribute 'format_header_param'
-python -m pip install "urllib3==1.26.18" --force-reinstall
 
 # 1. Добавляем пользователя user в группу meshcore
 sudo usermod -a -G meshcore user
