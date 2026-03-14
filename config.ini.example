@@ -729,13 +729,43 @@ force_translit = false
 # https://host:port
 proxy_url = socks5://192.168.88.10:1080
 
-[AI_Command] 
-system_prompt_file = ai_system_prompt.txt
+[AI_Command]
+# ─── Выбор бэкенда: ollama | openrouter ───
+backend = openrouter
+
+# ─── Ollama (когда backend = ollama) ───
 # Модели gemma2:2b, llama3.2:1b, tinyllama и т.д.
-model = tinyllama 
-temperature = 0.85
+model           = gemma2:2b
 # можно уменьшить до 1024–1536 если памяти мало
-num_ctx    = 1024          
-num_predict = 140
-top_p      = 0.92
-repeat_penalty = 1.12
+num_ctx         = 1024
+num_predict     = 120
+repeat_penalty  = 1.12
+
+# ─── OpenRouter (когда backend = openrouter) ───
+openrouter_api_key   = sk-or-v1-ваш_ключ_сюда
+openrouter_base_url  = https://openrouter.ai/api/v1
+openrouter_model     = google/gemma-2-2b-it
+openrouter_timeout   = 60
+# openrouter_referer = https://your-site.com
+# openrouter_title   = MeshBot
+
+# Бюджет токенов для обычных моделей
+max_tokens = 200
+
+# Бюджет для reasoning-моделей (reasoning + content)
+# Должен быть значительно больше max_tokens
+max_completion_tokens = 600
+
+# Усилие reasoning: low / medium / high
+# low = модель меньше "думает", больше остаётся на ответ
+reasoning_effort = low
+
+# frequency_penalty для OpenRouter (если не задан — вычисляется как repeat_penalty − 1.0)
+# frequency_penalty = 0.12
+
+# ─── Общие параметры ───
+temperature = 0.85
+top_p       = 0.92
+
+# Файл с кастомным системным промптом (опционально)
+# system_prompt_file = /path/to/prompt.txt
